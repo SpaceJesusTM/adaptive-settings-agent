@@ -22,6 +22,8 @@ function PreferenceChip({ s }: { s: PreferenceSuggestion }) {
   const dims = useAppStore((st) => st.profile?.dimensions ?? EMPTY);
   const [scope, setScope] = useState<"session" | "durable">(s.scope);
   const [dim, setDim] = useState(s.dimension);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<null | "saved" | "declined">(null);
   if (done) return <p className="pref-done">{done === "saved" ? "Preference saved." : "Not saved."}</p>;
   return (
@@ -29,31 +31,50 @@ function PreferenceChip({ s }: { s: PreferenceSuggestion }) {
       <span className="layer-label">Save this as a preference?</span>
       <div className="pref-row">
         <span>{s.direction === "prioritize" ? "Prioritize" : "De-prioritize"}</span>
-        <select value={dim} onChange={(e) => setDim(e.target.value)} aria-label="Preference dimension">
+        <select value={dim} disabled={saving} onChange={(e) => setDim(e.target.value)} aria-label="Preference dimension">
           {dims.map((d) => (
             <option key={d.id} value={d.id}>
               {d.label}
             </option>
           ))}
         </select>
-        <select value={scope} onChange={(e) => setScope(e.target.value as "session" | "durable")} aria-label="Preference scope">
+        <select
+          value={scope}
+          disabled={saving}
+          onChange={(e) => setScope(e.target.value as "session" | "durable")}
+          aria-label="Preference scope"
+        >
           <option value="session">this session only</option>
           <option value="durable">lasting (all games)</option>
         </select>
       </div>
       <p className="pref-quote">“{s.quote}”</p>
+      {error ? (
+        <p className="pref-error" role="alert">
+          {error}
+        </p>
+      ) : null}
       <div className="pref-actions">
         <button
           type="button"
           className="btn btn-small btn-primary"
+          disabled={saving}
           onClick={() => {
-            void confirm(s, scope, dim);
-            setDone("saved");
+            setSaving(true);
+            setError(null);
+            void confirm(s, scope, dim).then((ok) => {
+              setSaving(false);
+              if (ok) {
+                setDone("saved");
+              } else {
+                setError("Could not save preference. Please try again.");
+              }
+            });
           }}
         >
-          Save preference
+          {saving ? "Saving…" : "Save preference"}
         </button>
-        <button type="button" className="btn btn-small btn-ghost" onClick={() => setDone("declined")}>
+        <button type="button" className="btn btn-small btn-ghost" disabled={saving} onClick={() => setDone("declined")}>
           No thanks
         </button>
       </div>
@@ -61,11 +82,31 @@ function PreferenceChip({ s }: { s: PreferenceSuggestion }) {
   );
 }
 
+export function participantStepLabel(raw?: string): string {
+  const text = (raw || "").trim();
+  if (!text) return "Thinking…";
+  if (/^Reviewing .+ settings \(\d+\/\d+\)$/i.test(text)) return `${text}…`;
+  if (text.startsWith("Reading your current settings")) return "Checking your settings…";
+  if (
+    text.startsWith("Asking local model") ||
+    text.startsWith("Checking whether more") ||
+    text.startsWith("Looking up:")
+  ) {
+    return "Checking relevant settings…";
+  }
+  if (text === "Writing suggestions") return "Drafting recommendations (nothing applied yet)…";
+  if (text === "Refining suggestions") return "Refining recommendations…";
+  if (text.startsWith("Checking suggestions against")) return "Validating suggestions (nothing applied yet)…";
+  if (text.startsWith("Using basic offline suggestions")) return "Preparing offline suggestions…";
+  return "Thinking…";
+}
+
 function AssistantMessage({ game, msg }: { game: GameId; msg: ChatMessage }) {
   const res = msg.response!;
   const experimenterMode = useAppStore((s) => s.experimenterMode);
   const requestFocus = useAppStore((s) => s.requestFocusInMainWindow);
   const openWorkspace = useAppStore((s) => s.openWorkspace);
+  const stage = useAppStore((s) => s.stage);
   const proposals = useAppStore((s) => s.proposals[game] ?? EMPTY);
   const [showChecked, setShowChecked] = useState(false);
   const [showFiltered, setShowFiltered] = useState(false);
@@ -80,6 +121,7 @@ function AssistantMessage({ game, msg }: { game: GameId; msg: ChatMessage }) {
     .reduce((n, p) => n + p.items.filter((i) => i.status === "pending").length, 0);
   const reviewCount = livePendingInProposal || (res.stagedCount ?? 0);
   const cov = res.plan?.coverage;
+  const isStaged = reviewCount > 0 || Boolean(res.alreadyPendingCount) || Boolean(res.stagedProposalId);
 
   return (
     <div className="msg msg-assistant">
@@ -127,17 +169,37 @@ function AssistantMessage({ game, msg }: { game: GameId; msg: ChatMessage }) {
               <>
                 Already queued in your <strong>Changes</strong> list ({totalPendingInGame} pending). Nothing has been applied.
               </>
-            ) : (
+            ) : res.stagedProposalId ? (
               <>Suggestions reviewed — check Changes for current status.</>
+            ) : (
+              <>Suggestions were not automatically staged — prepare them when ready to review.</>
             )}
             {res.plan?.partialCoverage ? (
               <span className="msg-partial-tag"> · Partial coverage ({res.plan.batchesCompleted}/{res.plan.batchesTotal} sections)</span>
             ) : null}
           </div>
           <div className="msg-staged-actions">
-            <button type="button" className="btn btn-primary btn-small" onClick={() => openWorkspace("changes")}>
-              Review {reviewCount || totalPendingInGame || res.recommendations.length} change{(reviewCount || totalPendingInGame || res.recommendations.length) === 1 ? "" : "s"}
-            </button>
+            {isStaged ? (
+              <button type="button" className="btn btn-primary btn-small" onClick={() => openWorkspace("changes")}>
+                Review {reviewCount || totalPendingInGame || res.recommendations.length} change{(reviewCount || totalPendingInGame || res.recommendations.length) === 1 ? "" : "s"}
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="btn btn-primary btn-small"
+                onClick={() =>
+                  void stage(
+                    game,
+                    res.recommendations,
+                    res.provenance.source === "ai" ? "ai" : "fallback",
+                    msg.runId ?? null,
+                    `Suggested changes (${res.recommendations.length})`,
+                  )
+                }
+              >
+                Prepare for review ({res.recommendations.length})
+              </button>
+            )}
             {cov ? (
               <button
                 type="button"
@@ -323,7 +385,9 @@ export function Chat({ game }: { game: GameId }) {
                 ))}
               </ol>
             ) : (
-              <span className="progress-simple">Thinking…</span>
+              <span className="progress-simple">
+                {participantStepLabel(run.steps[run.steps.length - 1]?.label)}
+              </span>
             )}
             <span className="progress-time">{run.elapsedMs ? `${(run.elapsedMs / 1000).toFixed(1)} s` : ""}</span>
           </div>

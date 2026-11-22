@@ -245,7 +245,7 @@ def needs_repair(
             return "\n".join(f"- {f['reason']}" for f in bad[:5])
     if scope_plan is not None and getattr(scope_plan, "scope", None) == "explain_only":
         return None
-    if audit is not None and int(audit.get("eligibleCount", 1)) == 0:
+    if audit is not None and int(audit.get("eligibleCount", 1)) == 0 and not getattr(scope_plan, "single_setting_hint", False):
         return None
     # The user explicitly asked what to change but got no (valid) recommendation and nothing was blocked for a
     # legitimate reason (lock, already set, unavailable): ask once more for concrete recommendations.

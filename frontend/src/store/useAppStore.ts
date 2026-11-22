@@ -157,7 +157,7 @@ interface AppState {
   setCardOpen: (cardId: string, open: boolean) => void;
   triggerContext: (game: GameId, eventType: string | null) => Promise<void>;
   loadProfile: () => Promise<void>;
-  confirmPreference: (s: PreferenceSuggestion, scope: "session" | "durable", dimension?: string) => Promise<void>;
+  confirmPreference: (s: PreferenceSuggestion, scope: "session" | "durable", dimension?: string) => Promise<boolean>;
   addPreference: (game: GameId, dimension: string, direction: "prioritize" | "deprioritize", scope: "session" | "durable", note?: string) => Promise<void>;
   removePreference: (id: string) => Promise<void>;
   clearGoals: (game: GameId) => Promise<void>;
@@ -275,9 +275,14 @@ export const useAppStore = create<AppState>((set, get) => ({
             if (msg.type === "state_changed") {
               void api.session().then((fresh) => {
                 set({ session: fresh });
-                void get().refreshState(msg.game);
-                if (fresh.condition === "adaptive") void get().refreshAdaptive(msg.game);
-                if (msg.game === "valorant") void get().loadCrosshairProfiles();
+                const targets = fresh.selectedGame && fresh.selectedGame !== msg.game
+                  ? [msg.game, fresh.selectedGame]
+                  : [msg.game];
+                for (const g of targets) {
+                  void get().refreshState(g);
+                  if (fresh.condition === "adaptive") void get().refreshAdaptive(g);
+                }
+                if (targets.includes("valorant")) void get().loadCrosshairProfiles();
               }).catch(() => undefined);
             } else if (msg.type === "navigate_setting") {
               const isDetached = new URLSearchParams(window.location.search).get("view") === "workspace";
@@ -879,10 +884,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       await api.addPreference({ dimension: dimension ?? s.dimension, direction: s.direction, scope, source: "chat_confirmed", game: s.game, note: s.quote });
       get().toast("success", scope === "session" ? "Saved for this session only." : "Saved as a lasting preference (applies across games).");
       broadcastSync({ type: "state_changed", game: s.game });
+      await get().refreshAdaptive(s.game);
+      return true;
     } catch (err) {
       get().toast("error", errText(err));
+      return false;
     }
-    await get().refreshAdaptive(s.game);
   },
 
   addPreference: async (game, dimension, direction, scope, note) => {

@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api/client";
 import { AdaptiveWorkspace } from "../adaptive/AdaptiveWorkspace";
 import { AssistantPanel } from "../adaptive/AssistantPanel";
+import { Chat, participantStepLabel } from "../adaptive/Chat";
 import { StudyBar } from "../components/chrome/StudyBar";
 import { HudEdgeEditor } from "../games/cs2/HudEdgeEditor";
 import { ValorantCrosshairPreview } from "../games/valorant/ValorantCrosshairPreview";
@@ -202,5 +203,97 @@ describe("Crosshair and HUD Edge reactive previews", () => {
     const safezone = container.querySelector('[data-testid="cs2-hud-safezone"]') as HTMLElement;
     expect(safezone.style.left).toBe("15%");
     expect(safezone.style.top).toBe("10%");
+  });
+});
+
+describe("PreferenceChip confirmation and participant progress feedback", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    seedAdaptive();
+  });
+
+  it("awaits backend response before showing Preference saved and allows retry on failure", async () => {
+    const assistantMsg = {
+      id: "msg_a1",
+      role: "assistant" as const,
+      runId: "run_1",
+      createdAt: new Date().toISOString(),
+      response: {
+        intent: "preference",
+        reply: "I can save this preference - confirm it below.",
+        knownsAndUnknowns: null,
+        goalDimensions: ["visibility"],
+        recommendations: [],
+        explanations: [],
+        navigateTo: null,
+        preferenceSuggestions: [
+          {
+            dimension: "visibility",
+            dimensionLabel: "Visibility & clarity",
+            direction: "prioritize" as const,
+            scope: "durable" as const,
+            quote: "I care more about visibility",
+            game: "valorant" as const,
+          },
+        ],
+        clarifyingQuestion: null,
+        filtered: [],
+        validationNotes: [],
+        provenance: { source: "ai" as const, model: "local", indicator: "connected" },
+      },
+    };
+    const addPrefSpy = vi
+      .spyOn(api, "addPreference")
+      .mockRejectedValueOnce(new Error("Network error"))
+      .mockResolvedValueOnce({ id: "pref_1" });
+    vi.spyOn(api, "state").mockResolvedValue(STATE);
+    vi.spyOn(api, "proposals").mockResolvedValue([PROPOSAL]);
+    vi.spyOn(api, "thread").mockResolvedValue([assistantMsg]);
+    vi.spyOn(api, "profile").mockResolvedValue({
+      preferences: [],
+      sessionGoals: { valorant: [], cs2: [] },
+      context: { valorant: null, cs2: null },
+      evidence: [],
+      dimensions: [{ id: "visibility", label: "Visibility & clarity" }],
+    });
+    vi.spyOn(api, "relevantNow").mockResolvedValue({
+      game: "valorant",
+      items: [],
+      trigger: null,
+      createdAt: null,
+      updateAvailable: false,
+    });
+
+    seedAdaptive({
+      profile: {
+        preferences: [],
+        sessionGoals: { valorant: [], cs2: [] },
+        context: { valorant: null, cs2: null },
+        evidence: [],
+        dimensions: [{ id: "visibility", label: "Visibility & clarity" }],
+      },
+      chat: { valorant: [assistantMsg] },
+    });
+
+    render(<Chat game="valorant" />);
+    await userEvent.click(screen.getByRole("button", { name: "Save preference" }));
+    expect(addPrefSpy).toHaveBeenCalledTimes(1);
+    expect(await screen.findByRole("alert")).toHaveTextContent(/Could not save preference/);
+    expect(screen.queryByText("Preference saved.")).toBeNull();
+
+    // Retry succeeds
+    await userEvent.click(screen.getByRole("button", { name: "Save preference" }));
+    expect(addPrefSpy).toHaveBeenCalledTimes(2);
+    expect(await screen.findByText("Preference saved.")).toBeInTheDocument();
+  });
+
+  it("maps backend run steps to participant-safe labels without leaking model tags or tool names", () => {
+    expect(participantStepLabel("Asking local model gemma4:12b-it-q4_K_M")).toBe("Checking relevant settings…");
+    expect(participantStepLabel("Looking up: get_setting_details")).toBe("Checking relevant settings…");
+    expect(participantStepLabel("Reviewing Video settings (1/2)")).toBe("Reviewing Video settings (1/2)…");
+    expect(participantStepLabel("Writing suggestions")).toBe("Drafting recommendations (nothing applied yet)…");
+    expect(participantStepLabel("Checking suggestions against the catalogue, locks and allowed values")).toBe(
+      "Validating suggestions (nothing applied yet)…",
+    );
   });
 });

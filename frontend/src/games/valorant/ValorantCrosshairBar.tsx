@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { api } from "../../api/client";
+import { broadcastSync } from "../../lib/sync";
 import { useAppStore } from "../../store/useAppStore";
 
 export function ValorantCrosshairBar({ activeSubtab }: { activeSubtab: string }) {
   const profiles = useAppStore((s) => s.crosshairProfiles);
+  const loadCrosshairProfiles = useAppStore((s) => s.loadCrosshairProfiles);
   const selectProfile = useAppStore((s) => s.selectCrosshairProfile);
   const createProfile = useAppStore((s) => s.createCrosshairProfile);
   const renameProfile = useAppStore((s) => s.renameCrosshairProfile);
@@ -97,6 +99,8 @@ export function ValorantCrosshairBar({ activeSubtab }: { activeSubtab: string })
     try {
       await api.changeBatch("valorant", changes, "Copy Primary Crosshair to ADS");
       await refreshState("valorant");
+      await loadCrosshairProfiles();
+      broadcastSync({ type: "state_changed", game: "valorant" });
       toast("success", "Copied Primary crosshair settings to Aim Down Sights.");
     } catch (err) {
       toast("error", err instanceof Error ? err.message : String(err));

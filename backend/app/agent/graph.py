@@ -14,6 +14,7 @@ The model never receives a write tool; the graph has no node that mutates settin
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any, Callable, Optional, TypedDict
 
@@ -24,15 +25,27 @@ from ..domain.planner import build_coverage_audit
 from ..domain.profile import ProfileService
 from ..domain.store import Store
 from .intent import detect_dimensions
-from .prompts import compose_messages, plan_messages, render_context, render_plan_context, scope_instruction_for
-from .schemas import AssistantDraft, DraftRecommendation
+from .prompts import (
+    compose_batch_messages,
+    compose_messages,
+    plan_messages,
+    recent_conversation,
+    render_context,
+    render_plan_context,
+    scope_instruction_for,
+)
+from .schemas import AssistantDraft, BatchDraft, DraftRecommendation
 from .scope import ScopePlan, classify_scope
 from .tools import MAX_TOOL_RESULT_CHARS, ToolContext, get_current_ui_state, get_user_preferences, langchain_tools, run_tool, search_settings
 from .validate import needs_repair, validate_draft
 
 MAX_CALLS_PER_ROUND = 4
-BATCH_SIZE = 8
+BATCH_SIZE = 12
 ProgressFn = Callable[[str], None]
+_HISTORY_QUERY_RE = re.compile(
+    r"\b(history|previous change|last change|what did i change|changed earlier|undid|already changed|recent change)\b",
+    re.I,
+)
 
 
 class InvalidModelToolCall(ValueError):
@@ -63,6 +76,7 @@ class TurnState(TypedDict, total=False):
     batch_partial: bool
     batches_completed: int
     batches_total: int
+    needs_plan: bool
     started_mono: float
 
 
@@ -88,11 +102,20 @@ def _category_batches(cands: list[dict[str, Any]], max_recs: int) -> list[tuple[
     groups: dict[str, list[str]] = {}
     for c in cands[:max_recs]:
         groups.setdefault(c["category"], []).append(c["settingId"])
-    batches: list[tuple[str, list[str]]] = []
+    raw_chunks: list[tuple[str, list[str]]] = []
     for cat, sids in groups.items():
         for i in range(0, len(sids), BATCH_SIZE):
-            batches.append((cat, sids[i: i + BATCH_SIZE]))
-    return batches
+            raw_chunks.append((cat, sids[i: i + BATCH_SIZE]))
+    # Pack smaller adjacent category slices up to BATCH_SIZE to reduce sequential LLM calls on full setups.
+    packed: list[tuple[str, list[str]]] = []
+    for cat, sids in raw_chunks:
+        if packed and len(packed[-1][1]) + len(sids) <= BATCH_SIZE:
+            prev_cat, prev_ids = packed[-1]
+            label = prev_cat if prev_cat == cat else f"{prev_cat} & {cat}"
+            packed[-1] = (label, prev_ids + sids)
+        else:
+            packed.append((cat, list(sids)))
+    return packed
 
 
 def build_turn_graph(
@@ -104,6 +127,7 @@ def build_turn_graph(
     max_tool_rounds: int,
     progress: ProgressFn,
     deadline_s: float = 240.0,
+    fast_path: bool = True,
 ):
     """`plan_model` must support `.bind_tools`; `compose_model` must support `.with_structured_output`."""
 
@@ -168,10 +192,27 @@ def build_turn_graph(
         else:
             candidates = list(dict.fromkeys(audit_ids + [h["id"] for h in searched]))[: max(10, scope_plan.max_recs + 4)]
 
-        plan_context = render_plan_context(ctx, scope_plan=scope_plan, audit=audit, searched=searched)
+        needs_plan = False
+        if max_tool_rounds > 0:
+            if not fast_path:
+                needs_plan = True
+            elif _HISTORY_QUERY_RE.search(state["message"]):
+                needs_plan = True
+            elif (
+                scope_plan.scope == "explain_only"
+                and not searched
+                and not recent_conversation(store, state["game"], exchanges=1)
+            ):
+                needs_plan = True
+
+        plan_hist = (
+            _to_lc(plan_messages(state["game"], render_plan_context(ctx, scope_plan=scope_plan, audit=audit, searched=searched), state["message"]))
+            if needs_plan
+            else []
+        )
         context = render_context(
             ctx,
-            candidates=candidates[:14],
+            candidates=candidates,
             weights=weights,
             scope_plan=scope_plan,
             audit=audit,
@@ -190,8 +231,9 @@ def build_turn_graph(
             "batch_partial": False,
             "batches_completed": 0,
             "batches_total": 1,
+            "needs_plan": needs_plan,
             "started_mono": started_mono,
-            "plan_history": _to_lc(plan_messages(state["game"], plan_context, state["message"])),
+            "plan_history": plan_hist,
         }
 
     async def plan(state: TurnState) -> dict[str, Any]:
@@ -248,15 +290,16 @@ def build_turn_graph(
     async def compose(state: TurnState) -> dict[str, Any]:
         progress("Writing suggestions" if not state.get("repair_feedback") else "Refining suggestions")
         structured = compose_model.with_structured_output(AssistantDraft, method="json_schema", include_raw=True)
+        structured_batch = compose_model.with_structured_output(BatchDraft, method="json_schema", include_raw=True)
         scope_plan: ScopePlan = state["scope_plan"]
         audit = state["audit"]
         mc = list(state.get("model_calls", []))
 
-        # Use bounded per-category passes when a broad/full setup has many candidates so local Gemma 4 stays
-        # accurate and well within timeout limits.
+        # Use bounded category-packed passes when a broad/full setup has more than BATCH_SIZE candidates so local Gemma 4
+        # stays accurate and well within timeout limits.
         use_batches = (
             scope_plan.scope in ("broad_optimization", "full_game_setup")
-            and len(audit["candidates"]) > 10
+            and len(audit["candidates"]) > BATCH_SIZE
             and not state.get("repair_feedback")
         )
         if use_batches:
@@ -283,18 +326,29 @@ def build_turn_graph(
                     audit=audit,
                     batch_candidates=chunk_ids,
                     batch_label=cat_label,
+                    compact_state=idx > 0,
                 )
                 inst = scope_instruction_for(scope_plan, batch_label=cat_label, batch_idx=idx, batch_total=len(batches))
-                msgs = _to_lc(compose_messages(
-                    state["game"],
-                    bctx,
-                    state["message"],
-                    state.get("observations", []) if idx == 0 else [],
-                    scope_instruction=inst,
-                ))
+                if idx == 0:
+                    msgs = _to_lc(compose_messages(
+                        state["game"],
+                        bctx,
+                        state["message"],
+                        state.get("observations", []),
+                        scope_instruction=inst,
+                    ))
+                    invoker = structured
+                else:
+                    msgs = _to_lc(compose_batch_messages(
+                        state["game"],
+                        bctx,
+                        state["message"],
+                        scope_instruction=inst,
+                    ))
+                    invoker = structured_batch
                 t0 = time.perf_counter()
                 try:
-                    out = await structured.ainvoke(msgs)
+                    out = await invoker.ainvoke(msgs)
                 except Exception:
                     if idx == 0:
                         raise
@@ -313,7 +367,7 @@ def build_turn_graph(
                 raw_text = getattr(raw, "content", None) if raw is not None else None
                 if isinstance(raw_text, str):
                     raw_samples.append(raw_text[:800])
-                if not isinstance(parsed, AssistantDraft):
+                if not isinstance(parsed, (AssistantDraft, BatchDraft)):
                     if idx == 0:
                         return {
                             "draft": None,
@@ -326,7 +380,15 @@ def build_turn_graph(
                     partial = True
                     break
                 if first_draft is None:
-                    first_draft = parsed
+                    if isinstance(parsed, AssistantDraft):
+                        first_draft = parsed
+                    else:
+                        first_draft = AssistantDraft(
+                            intent="recommend",
+                            reply=f"Prepared {cat_label} suggestions for review.",
+                            goal_dimensions=scope_plan.inferred_dimensions[:4],
+                            recommendations=list(parsed.recommendations),
+                        )
                 for r in parsed.recommendations:
                     if r.setting_id not in seen_sids:
                         seen_sids.add(r.setting_id)
@@ -410,6 +472,17 @@ def build_turn_graph(
                 validated["validationNotes"].append(
                     f"Partial coverage: finished {completed} of {total} category batches within the turn deadline."
                 )
+            elif total > 1 and completed > 1 and validated["recommendations"]:
+                cats_covered = list(dict.fromkeys(
+                    (store.registry.setting(state["game"], r["settingId"]).category if store.registry.setting(state["game"], r["settingId"]) else r.get("tabId", ""))
+                    for r in validated["recommendations"]
+                ))
+                cats_covered = [c for c in cats_covered if c]
+                if len(cats_covered) > 1:
+                    cats_str = ", ".join(cats_covered)
+                    summary_line = f"Prepared {len(validated['recommendations'])} validated suggestions across {cats_str} for your review in Changes."
+                    if summary_line not in validated["reply"]:
+                        validated["reply"] = (validated["reply"].rstrip() + " " + summary_line)[:1800]
             validated["plan"] = {
                 **scope_plan.to_meta(),
                 "autoStage": scope_plan.auto_stage,
@@ -431,6 +504,12 @@ def build_turn_graph(
             }
         return {"validated": validated, "repair_feedback": feedback}
 
+    def after_prepare(state: TurnState) -> str:
+        return "plan" if state.get("needs_plan") else "compose"
+
+    def after_tools(state: TurnState) -> str:
+        return "compose" if state.get("tool_rounds", 0) >= max_tool_rounds else "plan"
+
     def after_validate(state: TurnState) -> str:
         if state.get("repair_feedback") and state.get("repairs", 0) < 1:
             return "repair"
@@ -447,9 +526,9 @@ def build_turn_graph(
     g.add_node("validate", validate)
     g.add_node("repair", repair)
     g.add_edge(START, "prepare")
-    g.add_edge("prepare", "plan")
+    g.add_conditional_edges("prepare", after_prepare, {"plan": "plan", "compose": "compose"})
     g.add_conditional_edges("plan", after_plan, {"tools": "tools", "compose": "compose"})
-    g.add_edge("tools", "plan")
+    g.add_conditional_edges("tools", after_tools, {"plan": "plan", "compose": "compose"})
     g.add_edge("compose", "validate")
     g.add_conditional_edges("validate", after_validate, {"repair": "repair", END: END})
     g.add_edge("repair", "compose")
@@ -472,5 +551,5 @@ def make_chat_models(settings) -> tuple[Any, Any]:
     )
     # Tool calls are short; a tight cap stops the planning call from drafting a full answer that is discarded anyway.
     plan_model = ChatOllama(num_predict=2048 if settings.ollama_think else 160, **common)
-    compose_model = ChatOllama(num_predict=6000 if settings.ollama_think else 3000, **common)
+    compose_model = ChatOllama(num_predict=6000 if settings.ollama_think else 2200, **common)
     return plan_model, compose_model

@@ -256,6 +256,7 @@ class AgentRunner:
                         max_tool_rounds=self.settings.agent_max_tool_rounds,
                         progress=handle.step,
                         deadline_s=self.settings.agent_deadline_s,
+                        fast_path=self.settings.agent_fast_path,
                     )
                     final = await asyncio.wait_for(
                         graph.ainvoke(
@@ -411,7 +412,7 @@ class AgentRunner:
                     recs = result.get("recommendations") or []
                     should_auto_stage = (
                         status in ("succeeded", "fallback")
-                        and result.get("intent") == "recommend"
+                        and plan_meta.get("scope") != "explain_only"
                         and len(recs) > 0
                         and bool(plan_meta.get("autoStage", True))
                     )

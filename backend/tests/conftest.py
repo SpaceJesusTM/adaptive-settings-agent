@@ -72,7 +72,8 @@ def fake_model_holder() -> dict[str, FakeChatModel]:
 def settings(tmp_path: Path):
     base = get_settings()
     return replace(base, db_path=tmp_path / "db dir with spaces" / "test.db", backup_dir=tmp_path / "backups",
-                   ollama_model="fake-model:test", agent_deadline_s=10.0, store_chat_history=True)
+                   ollama_model="fake-model:test", agent_deadline_s=10.0, store_chat_history=True,
+                   agent_fast_path=False)
 
 
 @pytest.fixture

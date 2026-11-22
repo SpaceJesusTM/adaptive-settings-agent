@@ -208,6 +208,7 @@ class Store:
         proposal_id: Optional[str] = None,
         client_request_id: Optional[str] = None,
         undoes_batch_id: Optional[str] = None,
+        sync_crosshair_profile: bool = True,
     ) -> dict[str, Any]:
         """Validate everything first, then write everything. Caller must hold a write transaction."""
         if client_request_id:
@@ -299,7 +300,7 @@ class Store:
             "INSERT INTO game_state(game, revision) VALUES (?, 1) ON CONFLICT(game) DO UPDATE SET revision = revision + 1",
             (game,),
         )
-        if game == "valorant" and any(s.id.startswith("val.crosshair.") for s, _ in effective):
+        if sync_crosshair_profile and game == "valorant" and any(s.id.startswith("val.crosshair.") for s, _ in effective):
             from .crosshair import sync_active_profile_tx
 
             sync_active_profile_tx(self, conn)
@@ -359,9 +360,11 @@ class Store:
                     raise Conflict("Undo would overwrite a later change. " + " ".join(b["reason"] for b in blocked),
                                    code="undo_conflict", details={"problems": blocked})
                 changes = [Change(e["setting_id"], loads(e["old_value_json"])) for e in events]
+                is_profile_switch = (batch["label"] or "").startswith("Crosshair profile: ")
                 summary = self._apply_tx(conn, game, changes, source="undo", label=f"Undo: {batch['label'] or ''}".strip(),
                                          enforce_locks=False, strict=False, check_availability=False,
-                                         client_request_id=client_request_id, undoes_batch_id=batch_id)
+                                         client_request_id=client_request_id, undoes_batch_id=batch_id,
+                                         sync_crosshair_profile=not is_profile_switch)
                 if summary.get("batchId"):
                     conn.execute("UPDATE change_batches SET undone_by_batch_id = ? WHERE id = ?", (summary["batchId"], batch_id))
                 return summary

@@ -150,6 +150,7 @@ def build_coverage_audit(
         # Score candidate hints against current value
         scored: list[tuple[float, Any, Any]] = []
         satisfied_dims: list[str] = []
+        skipped_minor = False
         for h in relevant_hints:
             w = positive[h.dimension]["weight"]
             if any(values_equal(current, v) for v in h.prefer):
@@ -159,20 +160,23 @@ def build_coverage_audit(
             if target is None:
                 continue
             if not scope_plan.include_minor and h.basis == "editorial" and w < 0.8 and s.verificationStatus == "secondary-only":
-                # Narrow/non-minor passes still allow official/primary hints; skip ultra-minor editorial tweaks only if low weight
-                pass
+                skipped_minor = True
+                continue
             scored.append((w * BASIS_FACTOR.get(h.basis, 0.8), h, target))
 
         if not scored:
-            cat_bucket["alreadyAligned"] += 1
-            already_aligned.append(
-                {
-                    "settingId": s.id,
-                    "label": s.exactLabel,
-                    "path": s.canonicalPath,
-                    "currentDisplay": display_value(s, current),
-                }
-            )
+            if satisfied_dims or not skipped_minor:
+                cat_bucket["alreadyAligned"] += 1
+                already_aligned.append(
+                    {
+                        "settingId": s.id,
+                        "label": s.exactLabel,
+                        "path": s.canonicalPath,
+                        "currentDisplay": display_value(s, current),
+                    }
+                )
+            else:
+                not_relevant_count += 1
             continue
 
         scored.sort(key=lambda t: -t[0])

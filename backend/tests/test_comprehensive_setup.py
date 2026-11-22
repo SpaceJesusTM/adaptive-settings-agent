@@ -220,6 +220,40 @@ def test_safety_filters_enforce_personal_controls_even_in_large_plans(services):
     assert rejected["cs2.video.video_preset"] == "not_proposable"
 
 
+def test_minor_editorial_secondary_hints_filtered_unless_include_minor(services):
+    from app.agent.scope import ScopePlan
+    from app.domain.planner import build_coverage_audit
+
+    # Low-weight focus dimension (0.6 via simulated context / low weight) on secondary-only editorial setting val.general.show_blood
+    conn = services.store.connect()
+    try:
+        weights = {"focus": {"weight": 0.6, "reasons": [{"kind": "context", "text": "test"}]}}
+        narrow = ScopePlan(
+            scope="focused", max_recs=3, auto_stage=True, include_minor=False,
+            is_supplement=False, reason="test", inferred_dimensions=["focus"],
+        )
+        wide = ScopePlan(
+            scope="full_game_setup", max_recs=40, auto_stage=True, include_minor=True,
+            is_supplement=False, reason="test", inferred_dimensions=["focus"],
+        )
+        audit_narrow = build_coverage_audit(services.store, services.profile, conn, "valorant", weights=weights, scope_plan=narrow)
+        audit_wide = build_coverage_audit(services.store, services.profile, conn, "valorant", weights=weights, scope_plan=wide)
+        narrow_cand_ids = {c["settingId"] for c in audit_narrow["candidates"]}
+        narrow_aligned_ids = {c["settingId"] for c in audit_narrow["alreadyAlignedItems"]}
+        wide_cand_ids = {c["settingId"] for c in audit_wide["candidates"]}
+
+        assert "val.general.show_blood" not in narrow_cand_ids
+        assert "val.general.show_blood" not in narrow_aligned_ids
+        assert "val.general.show_blood" in wide_cand_ids
+
+        # High weight (1.0) retains minor editorial/secondary hints even when include_minor=False
+        high_weights = {"focus": {"weight": 1.0, "reasons": [{"kind": "message", "text": "test"}]}}
+        audit_high = build_coverage_audit(services.store, services.profile, conn, "valorant", weights=high_weights, scope_plan=narrow)
+        assert "val.general.show_blood" in {c["settingId"] for c in audit_high["candidates"]}
+    finally:
+        conn.close()
+
+
 def test_multi_batch_compose_and_partial_coverage_handling(services, fake_model_holder, connected_ollama):
     reset(services.store, services.settings.scenario_dir, services.settings.backup_dir, "fresh_install_comprehensive", "full", backup=False)
     set_condition(services, "adaptive", aiMode="local")

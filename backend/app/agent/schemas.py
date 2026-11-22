@@ -47,3 +47,7 @@ class AssistantDraft(BaseModel):
     navigate_to: Optional[str] = Field(default=None, description="Setting id to show the user, if they asked where something is.")
     preference_suggestions: list[DraftPreference] = Field(default_factory=list)
     clarifying_question: Optional[str] = None
+
+
+class BatchDraft(BaseModel):
+    recommendations: list[DraftRecommendation] = Field(default_factory=list)

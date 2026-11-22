@@ -124,26 +124,55 @@ def get_setting_details(ctx: ToolContext, setting_ids: list[str]) -> dict[str, A
     return {"settings": found, "unknown_ids": missing}
 
 
+_SEARCH_STOPWORDS = frozenset({
+    "the", "for", "and", "with", "what", "does", "should", "can", "could", "would", "how", "why",
+    "where", "when", "which", "who", "this", "that", "these", "those", "turn", "set", "use", "keep",
+    "change", "enable", "disable", "lower", "raise", "make", "need", "want", "find", "show", "menu",
+    "setting", "settings", "game", "valorant", "cs2", "on", "off", "in", "to", "is", "are", "do",
+    "my", "me", "it", "be", "or", "an", "of", "at", "by", "from", "into", "over", "under", "about",
+})
+
+
+def _tokens_for(text: str) -> set[str]:
+    lower = (text or "").lower()
+    raw = re.findall(r"[a-z0-9\-+]+", lower)
+    return set(raw) | {t.replace("-", "") for t in raw}
+
+
 def search_settings(ctx: ToolContext, query: str, limit: int = 6) -> dict[str, Any]:
     values, locks, _pins, hw = _snapshot(ctx)
-    words = [w for w in re.findall(r"[a-z0-9\-+]+", (query or "").lower()) if len(w) > 1]
+    raw_words = [w for w in re.findall(r"[a-z0-9\-+]+", (query or "").lower()) if len(w) > 1]
+    words = [w for w in raw_words if w not in _SEARCH_STOPWORDS] or raw_words
     dims = set(detect_dimensions(query or ""))
+    q_norm = re.sub(r"[^a-z0-9]+", "", (query or "").lower())
     scored = []
     for s in ctx.store.registry.settings(ctx.game):
         if s.controlType == "preset":
             continue
         label, path, desc = s.exactLabel.lower(), s.canonicalPath.lower(), s.description.lower()
+        label_toks = _tokens_for(label)
+        path_toks = _tokens_for(path)
+        desc_toks = _tokens_for(desc)
         score = 0.0
-        if query and query.lower().strip() in label:
+        if query and (query.lower().strip() in label or (q_norm and len(q_norm) > 2 and q_norm in re.sub(r"[^a-z0-9]+", "", label))):
             score += 6
         for w in words:
-            if w in label:
-                score += 3
+            wn = w.replace("-", "")
+            if w in label_toks or wn in label_toks:
+                score += 6.0
+            elif w in label:
+                score += 2.5
+            elif w in path_toks or wn in path_toks:
+                score += 3.0
             elif w in path:
                 score += 1.5
+            elif w in desc_toks or wn in desc_toks:
+                score += 1.5
             elif w in desc:
-                score += 1
+                score += 0.5
         score += 2 * len(dims & set(s.goalTags))
+        if score > 0 and s.aiProposable:
+            score += 0.25
         if score > 0:
             scored.append((score, s.order, s))
     scored.sort(key=lambda t: (-t[0], t[1]))

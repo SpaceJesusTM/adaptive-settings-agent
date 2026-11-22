@@ -84,6 +84,7 @@ class Settings:
     frontend_port: int
     store_chat_history: bool
     cors_origins: list[str] = field(default_factory=list)
+    agent_fast_path: bool = True
 
     @property
     def backend_connect_host(self) -> str:
@@ -116,7 +117,7 @@ def get_settings() -> Settings:
         ollama_timeout_s=_ollama_timeout(),
         ollama_think=_bool("OLLAMA_THINK", False),
         ollama_temperature=_float("OLLAMA_TEMPERATURE", 0.2),
-        ollama_num_ctx=_int("OLLAMA_NUM_CTX", 16384),
+        ollama_num_ctx=_int("OLLAMA_NUM_CTX", 8192),
         agent_max_tool_rounds=_int("AGENT_MAX_TOOL_ROUNDS", 2),
         agent_deadline_s=_float("AGENT_DEADLINE_S", 150.0),
         backend_host=os.environ.get("BACKEND_HOST", "127.0.0.1").strip(),
@@ -124,4 +125,5 @@ def get_settings() -> Settings:
         frontend_port=frontend_port,
         store_chat_history=_bool("STORE_CHAT_HISTORY", True),
         cors_origins=origins,
+        agent_fast_path=_bool("AGENT_FAST_PATH", True),
     )

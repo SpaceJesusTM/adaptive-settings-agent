@@ -59,11 +59,14 @@ def test_valorant_crosshair_profiles_crud_import_export_and_undo(services, clien
     st_back = client.get("/api/games/valorant/state").json()["values"]
     assert st_back["val.crosshair.primary_custom_color"]["value"] == "#00FF00"
 
-    # Undo restores previous profile's values
+    # Undo restores previous profile's values without overwriting the switched-to profile's saved snapshot
     batch_id = sel.json()["batch"]["batchId"]
     undo = client.post(f"/api/history/{batch_id}/undo", json={})
     assert undo.status_code == 200
     assert client.get("/api/games/valorant/state").json()["values"]["val.crosshair.primary_color"]["value"] == "cyan"
+    profiles_after_undo = {p["id"]: p for p in client.get("/api/valorant/crosshair/profiles").json()}
+    assert profiles_after_undo[def_id]["settings"]["val.crosshair.primary_custom_color"] == "#00FF00"
+    assert profiles_after_undo[new_pid]["settings"]["val.crosshair.primary_color"] == "cyan"
 
     # Enforce 15-profile limit
     while len(services.crosshair.list()) < 15:

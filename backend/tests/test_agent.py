@@ -285,3 +285,65 @@ async def _run_turn(services, game, message):
             return status
         await asyncio.sleep(0.02)
     raise AssertionError("run did not finish")
+
+
+def test_fast_path_skips_redundant_plan_on_grounded_turn(services, fake_model_holder, connected_ollama):
+    from dataclasses import replace as dc_replace
+
+    set_condition(services, "adaptive")
+    services.runner.settings = dc_replace(services.settings, agent_fast_path=True)
+    fake_model_holder["model"] = FakeChatModel(compose_payloads=[{
+        "intent": "recommend",
+        "reply": "Turning Bloom off may reduce visual distraction.",
+        "goal_dimensions": ["performance"],
+        "recommendations": [{"setting_id": "val.video.bloom", "proposed_value": "Off", "why_for_goal": "Reduces post-processing work.", "confidence": "medium"}],
+    }])
+    result = asyncio.run(_run_turn(services, "valorant", "I'm getting frame drops and want higher FPS in VALORANT."))
+    assert result["status"] == "succeeded"
+    assert fake_model_holder["model"].calls == ["compose"]
+
+
+def test_tools_round_limit_short_circuits_to_compose(services, fake_model_holder, connected_ollama):
+    from dataclasses import replace as dc_replace
+
+    set_condition(services, "adaptive")
+    services.runner.settings = dc_replace(services.settings, agent_max_tool_rounds=1, agent_fast_path=False)
+    fake_model_holder["model"] = FakeChatModel(
+        plan_responses=[AIMessage(content="", tool_calls=[{"name": "get_setting_details", "args": {"setting_ids": ["val.video.bloom"]}, "id": "c1"}])],
+        compose_payloads=[{
+            "intent": "recommend",
+            "reply": "Consider disabling Bloom.",
+            "recommendations": [{"setting_id": "val.video.bloom", "proposed_value": "Off", "why_for_goal": "Less GPU effect work.", "confidence": "medium"}],
+        }],
+    )
+    result = asyncio.run(_run_turn(services, "valorant", "I want better performance."))
+    assert result["status"] == "succeeded"
+    # After 1 tool round reaches max_tool_rounds=1, workflow routes straight to compose without a dead extra plan call.
+    assert fake_model_holder["model"].calls == ["plan", "compose"]
+
+
+def test_focused_explain_intent_with_recommendation_still_auto_stages(services, fake_model_holder, connected_ollama):
+    set_condition(services, "adaptive")
+    fake_model_holder["model"] = FakeChatModel(compose_payloads=[{
+        "intent": "explain",
+        "reply": "VSync synchronizes frames and adds input lag; turning it off is commonly recommended.",
+        "recommendations": [{"setting_id": "val.video.vsync", "proposed_value": "Off", "why_for_goal": "Reduces frame buffering latency.", "confidence": "high"}],
+    }])
+    result = asyncio.run(_run_turn(services, "valorant", "Should I turn off VSync?"))
+    assert result["status"] == "succeeded"
+    res = result["result"]
+    assert res["plan"]["scope"] == "focused"
+    assert res["stagedCount"] == 1
+    assert res["stagedProposalId"]
+
+
+def test_search_settings_stops_substring_stopword_false_positives(services):
+    from app.agent.tools import ToolContext, search_settings
+
+    val_ctx = ToolContext(store=services.store, profile=services.profile, game="valorant", ui_state={})
+    val_hits = search_settings(val_ctx, "Should I turn off VSync?", limit=3)["results"]
+    assert val_hits and val_hits[0]["id"] == "val.video.vsync"
+
+    cs2_ctx = ToolContext(store=services.store, profile=services.profile, game="cs2", ui_state={})
+    cs2_hits = search_settings(cs2_ctx, "Should I disable V-Sync?", limit=3)["results"]
+    assert cs2_hits and cs2_hits[0]["id"] == "cs2.video.vsync"
