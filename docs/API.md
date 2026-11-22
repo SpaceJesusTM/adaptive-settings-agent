@@ -27,11 +27,22 @@ revision, locked, already applied/undone, run in progress, baseline condition) o
 | POST | `/api/history/{batchId}/undo` | Undo if nothing changed since (409 otherwise); recorded as a new batch |
 | PUT | `/api/games/{game}/pins/{settingId}` · `/locks/{settingId}` | `{on: bool}` (adaptive condition only) |
 
+## VALORANT Crosshair Profiles
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/valorant/crosshair/profiles` | List saved profiles (max 15) and active profile id |
+| POST | `/api/valorant/crosshair/profiles` | `{name, copyFromCurrent}` — create/duplicate profile |
+| POST | `/api/valorant/crosshair/profiles/import` | `{code, name}` — validate Riot `0;P;...;A;...;S;...` code & activate |
+| POST | `/api/valorant/crosshair/profiles/{profileId}/select` | Switch active crosshair profile cleanly |
+| PATCH | `/api/valorant/crosshair/profiles/{profileId}` | `{name}` — rename profile |
+| DELETE | `/api/valorant/crosshair/profiles/{profileId}` | Delete non-last profile |
+| GET | `/api/valorant/crosshair/profiles/{profileId}/export` | Serialize validated profile into Riot `0;P;...` code |
+
 ## Proposals (adaptive condition)
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/games/{game}/proposals?status=` | Proposals with live staleness/lock/availability per item |
-| POST | `/api/proposals` | Stage items `{game, source: ai/fallback/rules, runId, title, items:[{settingId, proposedValue, why, …}]}`; baseline value+revision captured server-side; locked/unavailable/no-op items stored as `blocked` |
+| POST | `/api/proposals` | Stage items `{game, source: ai/fallback/rules, runId, title, plan?, items:[{settingId, proposedValue, why, …}]}`; baseline value+revision captured server-side; locked/unavailable/no-op items stored as `blocked` |
 | PATCH | `/api/proposals/{id}/items/{itemId}` | User edit of a staged value (validated) |
 | POST | `/api/proposals/{id}/items/{itemId}/rebase` | User accepts that the setting changed since staging |
 | POST | `/api/proposals/{id}/apply` | `{itemIds, idempotencyKey}` — revision + lock + domain re-check, all-or-nothing, 409 explains conflicts |
@@ -40,7 +51,7 @@ revision, locked, already applied/undone, run in progress, baseline condition) o
 ## Assistant (adaptive condition)
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/api/chat` | `{game, message, uiState}` → 202 `{runId, status:"running", steps}`; one run per game (409 if busy) |
+| POST | `/api/chat` | `{game, message, uiState, scopeOverride?}` → 202 `{runId, status:"running", steps}`; one run per game (409 if busy); validated recommendations auto-stage idempotently into `Changes` |
 | GET | `/api/chat/runs/{runId}` | Progress steps while running; then `result` (validated response with `provenance`), tool calls, validation report |
 | POST | `/api/chat/runs/{runId}/cancel` | Cancel; nothing is changed |
 | GET / DELETE | `/api/games/{game}/chat` | Thread for the current session / clear it |

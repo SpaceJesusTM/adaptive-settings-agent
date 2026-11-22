@@ -68,3 +68,34 @@ proposable, which also guarantees that cross-game transfer cannot copy a numeric
 ### D-16 — E2E isolation
 Playwright starts its own backend (port 8766, `data/local/e2e.db`) and Vite (5174) and uses the installed Edge on
 Windows, so automated tests never touch the user's demo database and need no browser download.
+
+### D-17 — Intent-adaptive scope and per-category coverage planning (2026-11-22)
+* **Problem:** Capping every recommendation response at 3 items caused partial or fragmented plans when a user asked to optimize an entire category or configure a freshly installed game (`fresh_install_comprehensive`). Conversely, removing the cap unconditionally risked bloated proposals for narrow asks ("what does VSync do?" or "should I change VSync?").
+* **Decision:** Added `backend/app/agent/scope.py` (`explain_only`, `single_setting`, `focused_goal`, `broad_setup`, `full_setup`, with `explain_only` taking precedence over overrides) and `backend/app/domain/planner.py` (`build_coverage_audit`), raised `MAX_PROPOSAL_ITEMS` to `60`, and updated `graph.py` to iterate per-category batches when candidate pools exceed 10 items.
+* **Consequence:** Narrow asks stay capped at 1–3 items, comprehensive asks span Video/Audio/Game/General categories safely, well-configured competitive scenarios yield zero forced changes, and incomplete batches surface explicit partial-coverage metadata rather than silently dropping categories.
+
+### D-18 — Idempotent auto-staging without automatic application (2026-11-22)
+* **Problem:** Requiring participants to manually click *Stage* after asking for changes added friction without changing safety, especially on multi-category setup plans.
+* **Decision:** `runner.py` (`_finish` `write_tx`) now calls `proposals.auto_stage_for_run` automatically whenever an assistant turn produces valid recommendations, enforced idempotently at the database level via unique partial index `idx_proposals_run_autostage` (`schema_version = 2`).
+* **Consequence:** Validated suggestions appear immediately under `Workspace -> Changes` grouped by category and triggered a compact *Review N changes* CTA in chat, while zero active setting values ever change before the user clicks *Apply selected changes*.
+
+### D-19 — Unified Adaptive Workspace (`Changes`, `Pinned`, `Discover`) & detachable window sync (2026-11-22)
+* **Problem:** Fragmenting review tray, *Relevant now*, and pinned shortcuts across separate drawers competed for viewport width on 1280×720 laptops and obscured active workspace state.
+* **Decision:** Consolidated `Changes`, `Pinned`, and `Discover` inside `AdaptiveWorkspace.tsx` (also accessible at `/?view=workspace` via `StandaloneWorkspace.tsx`) with cross-tab synchronization in `frontend/src/lib/sync.ts` (`BroadcastChannel`, `localStorage`, and window focus listeners). Replaced an early Zustand v5 selector `?? {}` bug with module-level `EMPTY_MAP` to avoid React snapshot loops.
+* **Consequence:** Both docked and standalone workspaces share one state lifecycle without modifying canonical menu ordering.
+
+### D-20 — Pinned direct manual edits and CS2 explicit-apply Video guard (2026-11-22)
+* **Decision:** `PinnedWorkspaceTab` renders live manual `SettingControl` widgets that write directly via `/api/games/{game}/settings/{id}` (never entering the AI proposal queue) even if the user locked that setting against AI suggestions. If editing a CS2 `applyMode: "explicit"` Video setting while other unapplied Video drafts exist in `pendingVideo`, the UI prompts an explicit conflict choice instead of silently flushing or dropping drafts.
+
+### D-21 — Participant vs. Experimenter UI separation (2026-11-22)
+* **Decision:** Default UI opens in **Participant mode** (`StudyBar.tsx`): A/B condition badges, condition switcher, scenario reset controls (`ExperimenterDrawer.tsx`), `Trace` tab, and raw model tags (`gemma4:12b-it-q4_K_M`) stay hidden behind an explicit **Experimenter** toggle, leaving only compact *Local AI* / *Assistant offline* status and collapsed *What I checked* details.
+
+### D-22 — Mac local Ollama prompt compaction for `gemma4:12b-it-q4_K_M` (2026-11-22)
+* **Observed:** Full-catalog JSON context exceeded practical interactive latency on Apple Silicon local inference (`~206s` on initial broad test with larger payloads).
+* **Decision:** Compacted prompts (`render_plan_context` + candidate-filtered `render_context`), skipped redundant planning passes when scope classification already isolates candidate pools, guarded multi-batch composition against `AGENT_DEADLINE_S`, and documented macOS defaults (`OLLAMA_TIMEOUT=180`, `AGENT_DEADLINE_S=360`) in `MODEL_SETUP.md`.
+
+### D-23 — VALORANT Crosshair profiles & validated Riot share-code parser (2026-11-22)
+* **Decision:** Upgraded VALORANT Crosshair from a "not simulated" stub (superseding D-10 for Crosshair, Stats, Voice-Over, Actions/Equipment/Communication, CS2 `New`, and HUD Edge Positions) using Riot Patch Notes (`3.03`, `4.05`, `5.04`, `12.07`) and documented secondary bounds (`rangeVerified: false`). Implemented up to 15 stored profiles (`valorant_crosshair_profiles`), custom `#RRGGBB` color domain, reactive SVG preview, and a Riot `0;P;...;A;...;S;...` serializer/parser in `backend/app/domain/crosshair.py` that omits unmodeled metadata safely rather than fabricating settings.
+
+### D-24 — CS2 HUD Edge Positions (`safezonex` / `safezoney`) live safezone & `Done` save semantics (2026-11-22)
+* **Decision:** Added `cs2.video.hud_edge_x` (`0.50–1.0`) and `cs2.video.hud_edge_y` (`0.80–1.0`) extracted from `popup_hud_edge_positions.xml/.js` (`SteamDatabase/GameTracking-CS2` build `2000948` @ `694f81f`) with `applyMode: "immediate"` so pressing **Done** commits directly using Valve's `(1-Y)*50% / (1-X)*50%` safezone inset preview without applying unrelated pending `Advanced Video` drafts. The `0.50` `HudEdgeX` lower floor approximates Valve's runtime `OptionsMenuAPI.GetHudSafeZoneXMin()`.

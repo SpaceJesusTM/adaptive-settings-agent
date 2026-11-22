@@ -1,11 +1,13 @@
-# Game settings audit — VALORANT and Counter-Strike 2 (PC), as of 2026-11-20/21
+# Game settings audit — VALORANT and Counter-Strike 2 (PC), updated 2026-11-22
 
 This document records how the two simulated settings menus were researched, what each implemented setting is
 based on, what remains uncertain, and what was deliberately left out. The per-setting table (ID, canonical path,
 control, values/range, default status, verification level, primary source and date) is generated from the
-catalogues: **[CATALOG_REPORT.md](CATALOG_REPORT.md)** (`python scripts/catalog_report.py`).
+catalogues: **[CATALOG_REPORT.md](CATALOG_REPORT.md)** (`python scripts/catalog_report.py`), and a tab-by-tab
+completeness & simulation-fidelity matrix appears in **[SETTINGS_COMPLETENESS_AUDIT.md](SETTINGS_COMPLETENESS_AUDIT.md)**.
 
-Research was carried out on **2026-11-21**. Every setting carries `sourceURL`, `sourceDate`, `verificationStatus`,
+Research was initially carried out on **2026-11-21** and expanded on **2026-11-22** (catalogue version `2026.11.22-1`)
+to cover previously omitted VALORANT and CS2 sections. Every setting carries `sourceURL`, `sourceDate`, `verificationStatus`,
 `lastReviewed` and a stable `canonicalPath` in `data/catalogs/*.json`; catalogue integrity is enforced by the loader
 and by `backend/tests/test_catalog.py`.
 
@@ -13,17 +15,16 @@ and by `backend/tests/test_catalog.py`.
 
 | Level | Meaning | VALORANT | CS2 |
 |---|---|---|---|
-| `verified-game-files` | Label, options/range and (usually) default read from the CS2 client's own UI layout, localization and config files | – | **121** |
-| `verified-official-doc` | Label and location stated in a dated Riot support article or patch note | **22** | – |
+| `verified-game-files` | Label, options/range and (usually) default read from the CS2 client's own UI layout, localization and config files | – | **138** |
+| `verified-official-doc` | Label and location stated in a dated Riot support article or patch note | **24** | – |
 | `verified-official-screenshot` | Label, control type and options visible in a menu screenshot published by Riot | **32** | – |
-| `partially-verified` | Some aspects official, others from dated secondary sources (noted per setting) | **6** | – |
-| `secondary-only` | Only dated third-party sources; rendered with a † marker and never presented as official | **14** | – |
+| `partially-verified` | Some aspects official, others from dated secondary sources (noted per setting) | **28** | – |
+| `secondary-only` | Only dated third-party sources; rendered with a † marker and never presented as official | **93** | – |
 
-Section placement is marked separately (`pathVerification`): **19** VALORANT settings have an *inferred* section
-(see §3.2). Slider ranges that are not documented are flagged `rangeVerified: false`, shown with a ≈ marker, and are
-never AI-proposable. Defaults are only stated when verified (CS2: 93 verified from the registered convar defaults;
-VALORANT: 5 verified, 2 reported by secondary sources, the rest *unknown*). `sampleInitialValue` is synthetic demo
-data and is never presented as a factory default.
+Section placement is marked separately (`pathVerification`): **17** post-Patch-12.07 former *General > Other* VALORANT
+settings have an *inferred* section (see §3.2). Slider ranges that are not documented are flagged `rangeVerified: false`,
+shown with a ≈ marker, and are never AI-proposable. Defaults are only stated when verified (`CS2` convar defaults and
+published VALORANT entries; the rest *unknown*). `sampleInitialValue` is synthetic demo data and is never presented as a factory default.
 
 ## 2. Counter-Strike 2
 
@@ -36,6 +37,7 @@ data and is never presented as a factory default.
 | `cs2-convars` | Registered console variables and defaults `DumpSource2/convars.txt` (same commit) | 2026-11-20 | game files |
 | `cs2-video-presets` | Video presets `cfg/video_defaults_0..3.txt` (same commit) | 2026-11-20 | game files |
 | `cs2-keys-default` | Default key bindings `cfg/user_keys_default.vcfg` (same commit) | 2026-11-20 | game files |
+| `cs2-hud-popup` | CS2 HUD Edge Positions dialog `panorama/layout/popups/popup_hud_edge_positions.xml` & `.js` (build 2000948), via [SteamDatabase GameTracking-CS2 @ 694f81f](https://github.com/SteamDatabase/GameTracking-CS2/tree/694f81f05cfcd1994ea9ef6baa31d4583dc1d63b/game/csgo/pak01_dir/panorama/layout/popups) | 2026-11-20 | game files |
 | `cs2-update-2026-09-22` | Valve CS2 update: new **Crosshair/Scopes** tab, new styles, default crosshair “Dynamic Quad” | 2026-09-22 | official notes |
 | `cs2-update-2026-09-23` | Valve CS2 update: crosshair thickness/length/gap in **pixels**, half outlines, static square style, Dynamic Spread Limit | 2026-09-23 | official notes |
 | `cs2-update-2026-10-28` | Valve CS2 update: **Silent Reload Mode** (Hold/Toggle) | 2026-10-28 | official notes |
@@ -84,13 +86,9 @@ retrieved, so nothing in the catalogue depends on it.
 | Max Acceptable Game Traffic Bandwidth | Registered default (80000) is not one of the 8 menu options | Default **unknown** |
 | Boost Player Contrast | Likely backed by `r_player_visibility_mode` (default 1) but the layout does not name the convar | Default **inferred** |
 
-### 2.5 Not simulated (and why)
+### 2.5 Simulated approximations vs. deliberately omitted (CS2)
 
-New tab (dynamic contents unpublished) · HUD Edge Positions (on-screen tool) · Brightness (inverted gamma-to-percent
-mapping not verified) · Display selector, Resolution/Refresh/Audio device lists (runtime lists; *simulated* option
-lists are used and labelled) · Maximum FPS In Menus (0 = unlimited cannot be represented) · crosshair colour pickers ·
-music volumes for modes other than Competitive · Microphone Trigger Threshold (unit unclear) · controller/Steam Input ·
-chat-wheel phrases · most keybinds (18 representative ones are simulated).
+As of `2026.11.22-1`, the CS2 menu now simulates **138** verified settings including **HUD Edge Positions** (`safezonex` / `safezoney` via `HudEdgeEditor.tsx` with immediate **Done** commits independent of Video `Apply Changes`, using Valve's `(1-Y)*50% / (1-X)*50%` inset preview and a prototype `0.50` floor for `OptionsMenuAPI.GetHudSafeZoneXMin()`), **New** promoted tab (`PromotedTab.tsx`, labelled simulated hub highlighting documented Sept/Oct 2026 additions), **Display** selector (`cs2.video.display`), **Brightness** (`r_fullscreen_gamma`, `1.0–4.0`, default `2.2`), **Maximum FPS In Menus** (`fps_max_ui`, `0–1000`), **Microphone Trigger Threshold** (`voice_threshold`, `-120..0 dB`), **Crosshair Color** / **Alpha** (`0–255`), and **9** additional `settings_kbmouse.xml` / `user_keys_default.vcfg` binds. Remaining exclusions: dynamic server/client New-tab promotion manifest · hardware Display/Resolution/Refresh/Audio endpoint enumeration (labelled simulated lists) · music sliders for Casual/Deathmatch modes beyond Competitive · controller/Steam Input · chat-wheel phrase customization · remaining minor keybinds beyond the 29 bound rows simulated.
 
 ## 3. VALORANT
 
@@ -102,9 +100,10 @@ chat-wheel phrases · most keybinds (18 representative ones are simulated).
 | `riot-crash-2026-05` | [Troubleshooting Game Crashes](https://support.riotgames.com/en-us/valorant/support-tools/troubleshooting-game-crashes-in-valorant) | 2026-05-24 | Full Graphics Quality list incl. Multithreaded Rendering, Vignette, Anisotropic Filtering 1x; *Limit FPS Always* |
 | `riot-ui-faq-2026-01` | [VALORANT UI Settings FAQ](https://support.riotgames.com/en-us/valorant/gameplay/valorant-ui-settings-faq) — text **and embedded menu screenshots** | 2026-01-12 | General > Map, General > Other rows, Controls > Interface keybinds, control types, layout |
 | `riot-voice-2026-05` | [VALORANT Voice Chat Troubleshooting](https://support.riotgames.com/en-us/valorant/gameplay/valorant-voice-chat-troubleshooting) — text and Audio > Voice Chat screenshot | 2026-05-25 | All Voice Chat rows, PTT defaults |
+| `riot-patch-3-03`, `4-05`, `5-04` | Official Riot Patch Notes [3.03](https://playvalorant.com/en-us/news/game-updates/valorant-patch-notes-3-03/), [4.05](https://playvalorant.com/en-gb/news/game-updates/valorant-patch-notes-4-05/), [5.04](https://playvalorant.com/en-us/news/game-updates/valorant-patch-notes-5-04/) | 2021–2022 | Crosshair profiles (up to 15), Use Advanced Options, ADS/Sniper scope controls, custom `#RRGGBB` hex colors, H/V lines, import/export codes (`0;P;...`), Auto-Equip Prioritizes |
 | `riot-mtr-2024-04`, `riot-vsync-2024-01` | Riot articles on Multithreaded Rendering and VSync (Graphics Quality screenshot) | 2024 | Segment style (High/Med/Low), min specs |
 | `val-patch-11-06` … `val-patch-13-10` | Official patch notes **11.00–13.10** (all fetched and scanned) | 2025-06 → 2026-11-10 | See §3.2 |
-| `turbosmurfs-2026-09`, `neuralboost-2026-11`, `dotesports-ehc` | Dated third-party guides | 2026 | Secondary corroboration only |
+| `turbosmurfs-2026-09`, `neuralboost-2026-11`, `dotesports-ehc`, `val-secondary-xhair-2026` | Dated third-party guides (incl. [Tracker Crosshair Guide](https://tracker.gg/valorant/guides/crosshair-settings)) | 2026 | Secondary corroboration & undocumented slider bounds (`rangeVerified: false`) |
 
 ### 3.2 2026 menu changes that matter
 
@@ -133,14 +132,12 @@ chat-wheel phrases · most keybinds (18 representative ones are simulated).
 | Former *General > Other* rows | Pre-12.07 paths only | Section placement **inferred** (see §3.2) |
 | Slider scales (Minimap Size/Zoom, voice volumes) | Riot screenshots show labels but not ranges | Prototype bounds, `rangeVerified=false`, never AI-proposable |
 
-### 3.4 Not simulated (and why)
+### 3.4 Simulated expansions vs. deliberately omitted (VALORANT)
 
-**Crosshair tab** (no current Riot source documents the crosshair editor’s exact labels/ranges after the 2026
-updates — shown as a labelled “not simulated” page rather than invented) · Video > Stats · Audio > Voice-Over ·
-Controls > Actions / Equipment / Communication (keybind labels unconfirmed) · numeric “Max FPS …” fields under the
-Limit FPS toggles · Speaker Configuration (option list unknown) · in-match *Match* tab.
+As of `2026.11.22-1`, the VALORANT menu now implements: **Crosshair** (`General`, `Primary`, `Aim Down Sights`, `Sniper Scope` — **59** manual-only settings, 15 profiles in `valorant_crosshair_profiles`, custom `#RRGGBB` hex colors, reactive `<ValorantCrosshairPreview>` SVG, and validated `0;P;...;A;...;S;...` code parser/serializer), **Video > Stats** (5 telemetry toggles), **Video > General** numeric *Max FPS* sliders, **Audio > Sounds > Speaker Configuration** & **Audio > Voice-Over** (4 rows), and **Controls > Actions / Equipment / Communication** (**28** manual-only rows). Numeric bounds not documented by Riot remain flagged `rangeVerified: false` / `secondary-only` and `proposable: false`. Only the context-dependent in-match **Match** tab remains deliberately excluded (see [SETTINGS_COMPLETENESS_AUDIT.md](SETTINGS_COMPLETENESS_AUDIT.md)).
 
 ## 4. Visual fidelity
+* **Playwright comparison screenshots** are generated via `PW_CHANNEL=chrome npm --prefix frontend run screenshots` (or `npm --prefix frontend run screenshots` on Windows). The rest of §4 notes open-license fonts and original visual assets:
 
 * **VALORANT** layout follows Riot’s own screenshots (UI FAQ, Multithreaded Rendering and Voice Chat articles):
   centred uppercase tab bar on a hairline rule with diamond markers, pale-yellow active tab, centred sub-tabs,

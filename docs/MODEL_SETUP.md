@@ -13,16 +13,22 @@ ollama show gemma4:12b-it-q4_K_M
 
 If you want that same model and it is missing, explicitly run `ollama pull gemma4:12b-it-q4_K_M`. Ollama reports an 8.0 GB download for that tag. See the [Ollama model page](https://ollama.com/library/gemma4:12b-it-q4_K_M) and the [macOS requirements](https://docs.ollama.com/macos).
 
-Set these values in the root `.env` and restart the backend. Look at [.env.example](../.env.example) for the additional controls.
+Set these values in the root `.env` and restart the backend. Defaults in [.env.example](../.env.example) start with `OLLAMA_TIMEOUT=90` and `AGENT_DEADLINE_S=150`; on Apple Silicon macOS (`arm64`), raising timeouts prevents multi-category JSON generation from timing out mid-turn:
 
 ```dotenv
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_MODEL=gemma4:12b-it-q4_K_M
-OLLAMA_TIMEOUT=90
-AGENT_DEADLINE_S=150
+OLLAMA_TIMEOUT=180
+AGENT_DEADLINE_S=360
 ```
 
 Process environment variables take precedence over `.env` for the same key. The old `OLLAMA_TIMEOUT_S` name works when `OLLAMA_TIMEOUT` is absent or empty. Leave `OLLAMA_MODEL` empty to use the labelled offline fallback.
+
+## Verified macOS (`arm64`) observations (`2026-11-22`)
+
+- **Model & Ollama:** Verified on macOS `Darwin 27.0.0` (`arm64`) with Ollama `0.40.15` and `gemma4:12b-it-q4_K_M` (`11.9B`, `Q4_K_M`).
+- **Observed latency & deadline behavior:** The single structured-output smoke probe completes in `10.3 s`, while full LangGraph chat turns (read-only tool calls + candidate-filtered JSON compose) take `~133–284 s` (median `150.3 s`) on local Apple Silicon hardware. Multi-batch full-game setup generation (`cs2_full_setup`) hit the `360 s` `AGENT_DEADLINE_S` boundary and cleanly fell back to the labelled rule-based recommender (`21` categorized CS2 items, `valuesUnchanged = True`).
+- **macOS Playwright browser channel:** If Playwright's downloaded Chromium is absent locally while Google Chrome is installed, run browser tests with `PW_CHANNEL=chrome` (`PW_CHANNEL=chrome npm --prefix frontend run e2e`).
 
 ## Troubleshooting
 

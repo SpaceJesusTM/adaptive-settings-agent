@@ -1,6 +1,31 @@
-# Test summary (actual results, Windows test PC, 2026-11-21)
+# Test summary (latest verified runs: 2026-11-22 macOS arm64 & 2026-11-21 Windows PC)
 
-These results describe the original research prototype. The corresponding screenshots, generated replays and model transcripts stay local. See the [current CI workflow](../.github/workflows/ci.yml) for the public repository’s test commands.
+## 1. macOS arm64 comprehensive pass verification (2026-11-22)
+
+Environment: macOS `Darwin 27.0.0` (`arm64` Apple Silicon), Python `3.11.6` (`.venv`), Node.js `v22.20.0`, Ollama `0.40.15`, model `gemma4:12b-it-q4_K_M` (`11.9B`, `Q4_K_M`, `OLLAMA_TIMEOUT=180`, `AGENT_DEADLINE_S=360`), Google Chrome (`PW_CHANNEL=chrome`). Generated screenshots, backups, and live model transcripts stay local in git-ignored folders.
+
+| Suite | Command | Result |
+|---|---|---|
+| Backend unit/integration & portability | `.venv/bin/pytest -c backend/pytest.ini` | **97 passed** (incl. `test_comprehensive_setup.py`, `test_crosshair_and_hud.py`, `test_portability.py`) |
+| Production build & TypeScript | `npm --prefix frontend run build` | pass (`340.96 kB` JS / `102.22 kB` gzip, `52.61 kB` CSS / `10.34 kB` gzip) |
+| Frontend unit | `npm --prefix frontend test` | **15 passed** (`menu.test.tsx` 10, `workspace.test.tsx` 5) |
+| End-to-end journeys | `PW_CHANNEL=chrome npm --prefix frontend run e2e` | **17/17 passed** (`28.4 s`) |
+| Screenshot generation | `PW_CHANNEL=chrome npm --prefix frontend run screenshots` | **2/2 passed** (`11.9 s`, 8 PNGs in git-ignored `docs/screenshots/`) |
+| Live environment smoke check | `.venv/bin/python scripts/smoke_check.py --real-model` | **8/8 checks OK** (real structured-output probe `10.3 s`, `eval_count=10`) |
+| Curated real-model evaluation | `.venv/bin/python scripts/run_model_eval.py --cases perf_goal explain_aa focused_vsync cs2_full_setup well_configured model_failure` | Run `20261122-143214` (`1628.9 s`, **9 turns**): **7 AI turns** (`133,560 ms` min, `150,275 ms` median, `283,820 ms` max), **2 labelled fallback turns**, `3` `no_op` items filtered by validator, `valuesUnchanged: True` across all 6 cases |
+| Live browser preview (`preview_*`) | T3 preview at `1440×900` & `1280×720` (Participant, Experimenter, Crosshair, HUD Edge, `New`, `?view=workspace`) | Zero console errors, zero failed network requests; caught & fixed `StudyBar` Experimenter shrink, top-right `.toasts`, select caret alignment, and sticky Workspace Apply bar |
+
+### Live local `gemma4:12b-it-q4_K_M` case observations (`20261122-143214/summary.md`)
+* `perf_goal` (4 turns): all 4 answered by `gemma4:12b-it-q4_K_M` — Turn 1 (`283.8 s`) staged **12** recommendations across Video & General (`0` filtered); Turns 2–4 (`140.9 s`, `182.8 s`, `150.3 s`) answered explanations / preference suggestion with `0` staged (`valuesUnchanged = True`).
+* `explain_aa` (1 turn): answered by `gemma4:12b-it-q4_K_M` (`133.6 s`, `intent=explain`, `staged=0`).
+* `focused_vsync` (1 turn): answered by `gemma4:12b-it-q4_K_M` (`147.7 s`, returned `intent=explain` with 1 advisory recommendation `VSync: On -> Off`, `staged=0`).
+* `cs2_full_setup` (1 turn, `fresh_install_comprehensive`): exceeded `AGENT_DEADLINE_S=360` at `360,112 ms` during multi-batch Apple Silicon local generation and transitioned cleanly to the **labelled rule-based fallback**, staging **21** categorized items across Video, Audio, and Game (`valuesUnchanged = True`).
+* `well_configured` (1 turn, `well_configured_competitive`): answered by `gemma4:12b-it-q4_K_M` (`228.1 s`); validator removed **3** `no_op` items cleanly and staged `1` remaining setting (`Experimental Sharpening: Off -> On`).
+* `model_failure` (1 turn): unreachable Ollama (`19 ms`) triggered the labelled fallback immediately with **12** Video items staged (`valuesUnchanged = True`).
+
+## 2. Original Windows research baseline (2026-11-21)
+
+These baseline results describe the initial Windows prototype prior to the comprehensive pass. See the [current CI workflow](../.github/workflows/ci.yml) for CI commands.
 
 Environment: Windows 11 Pro 10.0.26300 (Python's `platform` reports it as "Windows 10"), Python 3.11.9 (project
 `.venv`), Node 24.15.0, Ollama 0.40.17, model `gemma4:12b-it-q4_K_M`, Microsoft Edge (Playwright channel `msedge`).
@@ -49,27 +74,11 @@ Environment: Windows 11 Pro 10.0.26300 (Python's `platform` reports it as "Windo
 * `test_portability.py` — project-relative paths; no machine-specific paths in source; SQLite in a folder with spaces;
   Unicode round trip; UTF-8 catalogues without BOM; helper scripts run as subprocesses.
 
-**Frontend unit (`frontend/src/test/menu.test.tsx`)** — identical rows and order in both conditions; no AI
-affordances in the baseline even with pending proposals; staged/lock affordances on the original rows in the adaptive
-condition; highlight never reorders rows; dependent rows disabled; segmented keyboard/click; dropdown offers only
-catalogue options; slider clamping; keybind capture maps to game key names; CS2 explicit-apply edits stay local.
-
-**E2E (`frontend/e2e/journeys.spec.ts`)** — A: manual change, reload persistence, history, undo; search to canonical
-row; CS2 pending video edits and Apply Changes; CS2 preset. Parity in both games. B/D: fallback suggestions do nothing
-until staged and applied, then undo; locks; preference saved only after confirmation with chosen scope. C/E: cross-game
-CS2 suggestions citing VALORANT, values unchanged; Relevant now holds on reload and does not reinsert a dismissed
-card; simulated context event labelled.
-
-## Issues found and fixed during testing (selection)
-* Zustand v5 selectors returning a fresh `[]` caused an infinite render loop in the adaptive panel → stable `EMPTY`.
-* Real model over-asked clarifying questions → intent decision procedure (evidence: `model_runs/20261121-101359`).
-* Real model misclassified a cross-game request once → deterministic repair rule + test.
-* E2E: a race in one test (captured cards before render) fixed; intermittent loss of a second Vite dev server
-  (5174) when running next to the dev server on Windows — E2E now builds the frontend and lets the isolated backend serve
-  it, after which 5/5 consecutive runs passed. The root cause of the Vite exits was not determined.
+* `test_comprehensive_setup.py` & `test_crosshair_and_hud.py` — intent scope classification (`explain_only` precedence, `single_setting`, `focused`, `category_optimization`, `full_game_setup`), idempotent auto-staging (`idx_proposals_run_autostage`), zero forced churn in `well_configured_competitive`, multi-batch partial-coverage deadline guard, personal/keybind safety enforcement, VALORANT 15-profile Crosshair CRUD + Riot `0;P;...` code parser + ADS/Sniper gating, and CS2 HUD Edge `Done` immediate apply separate from Video pending drafts.
+* **Frontend (`menu.test.tsx`, `workspace.test.tsx`)** — A/B row parity, no AI affordances in baseline, Participant vs. Experimenter drawer gating, direct manual Pinned edits & CS2 Video pending-draft conflict modal, reactive SVG VALORANT crosshair preview, CS2 HUD Edge safezone inset math, dependent disabled rows, segmented/dropdown/slider/keybind/color controls.
+* **E2E (`frontend/e2e/journeys.spec.ts`, 17 specs)** — baseline manual edit/reload/history/undo, search, CS2 explicit Apply & presets, Participant chrome hiding, A/B parity across both games, auto-staged single & >12-item comprehensive setups, Pinned manual edits/locks/undo, locked-item blocking, preference confirmation with scope, detached `/?view=workspace` cross-window sync, `Discover` (`Prepare for review`) cross-game transfer & reload hold + simulated context event, VALORANT Crosshair import/reload persistence, and CS2 HUD Edge `Done` independence + `New` tab.
 
 ## Not tested
-* **macOS** (no Mac available) — instructions are documented but unverified.
-* Linux, other GPUs/hardware, other Ollama versions or models.
-* The real games: the prototype never touches them, so no in-game effect is measured or claimed.
-* Human participants: no user study was run; nothing here establishes comprehension, usability or trust benefits.
+* Linux, additional GPUs/hardware, or other Ollama versions/models (Windows 11 + RTX 4080 SUPER baseline and macOS `Darwin 27.0.0` `arm64` are the verified environments).
+* Real VALORANT or CS2 installations: the prototype never touches game files and measures no in-game FPS or latency.
+* Human participants: no user study was run; comprehension, usability, and trust claims remain open (see [PARTICIPANT_PILOT.md](PARTICIPANT_PILOT.md)).

@@ -1,42 +1,52 @@
 # Implementation notes for the paper (verified facts only)
 
 *Adapting Without Rearranging: Conversational Guidance for Complex Settings* — CSC2524, University of Toronto.
-Everything below was implemented and checked in this repository on 2026-11-21. **No user study was conducted**; no
-participant data exists. Numbers come from automated tests and logged runs on one Windows PC.
+Everything below was implemented and verified across the original Windows prototype (2026-11-21) and the macOS
+comprehensive UX & settings pass (2026-11-22). **No human-participant study has been conducted**; no participant
+data exists. Numbers come from automated suites and logged local `gemma4:12b-it-q4_K_M` runs.
 
 ## System overview
 
 ```mermaid
 flowchart LR
   subgraph Browser["Browser (React + TypeScript)"]
-    M["Canonical game menu<br/>(VALORANT or CS2 shell)"]
-    A["Adaptive layer (condition B only)<br/>Relevant now · chat · review tray · pins/locks · preferences"]
+    M["Canonical game menu<br/>(VALORANT 177 or CS2 138)"]
+    A["Adaptive Workspace (condition B only)<br/>Changes · Pinned · Discover · Chat · ?view=workspace"]
   end
   subgraph Backend["FastAPI backend"]
-    C["Versioned catalogues<br/>(195 settings, provenance)"]
+    C["Versioned catalogues<br/>(315 settings, provenance)"]
     S["Store: values, revisions,<br/>history/undo (single write path)"]
-    P["Proposal engine<br/>(stage → revalidate → apply)"]
+    P["Proposal engine<br/>(idempotent auto-stage → revalidate → apply)"]
     R["Profile + deterministic recommender<br/>(goals, durable prefs, hold rule)"]
-    G["LangGraph turn: context → read-only tools<br/>→ JSON-schema answer → validator → (repair) → fallback"]
+    G["LangGraph turn: scope + planner → read-only tools<br/>→ batched JSON-schema compose → validator → fallback"]
   end
   O[("Ollama<br/>gemma4:12b-it-q4_K_M")]
   M -- "manual change" --> S
+  A -- "pinned direct manual edit" --> S
   A -- "goal / question" --> G
   G -- "read only" --> C & S & R
   G <-- "server-side only" --> O
-  G -- "validated suggestions" --> A
-  A -- "user stages" --> P
+  G -- "idempotent auto-stage" --> P
   P -- "explicit Apply" --> S
   R --> A
 ```
 
-* **Testbed:** two simulated PC settings menus. VALORANT: 74 settings (54 confirmed by Riot documentation or Riot-
-  published menu screenshots, 6 partially, 14 secondary-only and marked); CS2: 121 settings, all taken from the CS2
-  client files of build 2000948 (2026-11-20). Both menus share one typed settings engine and differ in layout and
-  styling (VALORANT: centred tabs, banded rows, segmented On/Off; CS2: top navigation, dropdown rows, split Advanced
-  Video with native Apply/Discard).
-* **Conditions:** A = static baseline (full menu, manual change, prototype search, history/undo). B = the same menu plus
-  augmentation. Automated tests assert identical rows and order in A and B and no AI affordances in A.
+* **Testbed:** two simulated PC settings menus (**315 settings total** in catalogue `2026.11.22-1`). VALORANT: **177 settings** (24 `verified-official-doc`, 32 `verified-official-screenshot`, 28 `partially-verified`, 93 `secondary-only`, plus 15-profile Crosshair editor with reactive SVG preview & Riot `0;P;...` code import/export); CS2: **138 settings** extracted from the CS2 client files of build `2000948` (`SteamDatabase/GameTracking-CS2 @ 694f81f`, incl. HUD Edge Positions `safezonex`/`safezoney` preview with immediate *Done* save and simulated *New* tab). Both menus share one typed settings engine and differ in layout and styling.
+* **Conditions:** A = static baseline (full menu, manual change, prototype search, history/undo). B = the same menu plus Participant-mode Adaptive UX (`Changes` / `Pinned` / `Discover` Adaptive Workspace, detachable `/?view=workspace`, simplified chat w/ auto-staged proposals, pins/locks, and Experimenter drawer hidden behind an explicit toggle). Automated tests assert identical rows and order in A and B and zero AI affordances in A.
+
+## Comprehensive Pass Extensions & Literature Grounding (2026-11-22)
+
+See [NEXT_PASS_DESIGN_AUDIT.md](NEXT_PASS_DESIGN_AUDIT.md), [RESEARCH_RATIONALE.md](RESEARCH_RATIONALE.md), and [PARTICIPANT_PILOT.md](PARTICIPANT_PILOT.md) for the detailed pass record:
+
+1. **Literature Synthesis (7 verified HCI papers):** Findlater & McGrenere (CHI 2004, IJHCS 2010), Bunt et al. (IUI 2007), Todi et al. (CHI 2021), Kim et al. (IUI 2026), Alves et al. (CHI 2026), and **Ingesson & Riveiro (DIS 2026)** (*When Do Users (Not) Want Explanations?* — corrected verified second author spelling; note that explanation demand is selective/goal-driven and passive explanations alone do not guarantee comprehension or calibration).
+2. **Intent-Adaptive Scope & Idempotent Auto-Staging:** `backend/app/agent/scope.py` and `backend/app/domain/planner.py` adapt candidate scope (`explain_only`, `single_setting`, `focused_goal`, `broad_setup`, `full_setup`) and perform per-category batching (`MAX_PROPOSAL_ITEMS=60`), while `proposals.auto_stage_for_run` stages validated plans idempotently (`idx_proposals_run_autostage`) without modifying any active value until explicit user Apply.
+3. **Adaptive Workspace, Pinned Direct Edits & Sync:** `AdaptiveWorkspace.tsx` unifies `Changes` (category-grouped diffs), `Pinned` (direct manual `SettingControl` edits honoring user authority over AI locks + CS2 pending Video conflict guard), and `Discover` (held proactive cards), synchronized with `/?view=workspace` over `BroadcastChannel` (`sync.ts`).
+4. **Participant vs. Experimenter Presentation:** `StudyBar.tsx` hides A/B tags, `Study controls`, `Trace`, and raw model IDs behind an explicit `Experimenter` toggle; chat replies collapse `What I checked` details by default.
+5. **Notable Deviations from Initial Spec & Rationale:** Prompt context uses deterministic pre-filtering (`render_plan_context` + candidate-scoped `render_context`) instead of sending the entire 315-setting JSON to local 12B inference on macOS (cutting multi-category prompt overhead while preserving read-only tool calls and server-side validation); CS2 `HudEdgeX` uses a `0.50` documented floor approximating `OptionsMenuAPI.GetHudSafeZoneXMin()`.
+
+## Automated checks vs. human claims boundary
+
+Track A (technical verification on macOS arm64 + Windows baseline) confirms A/B parity, zero unapproved setting writes, lock/keybind/sensitivity safety boundaries, Riot crosshair & CS2 safezone math, and schema-valid local `gemma4:12b-it-q4_K_M` responses (see [TEST_SUMMARY.md](TEST_SUMMARY.md)). **Track B (human evaluation) has not been executed**; the protocol in [PARTICIPANT_PILOT.md](PARTICIPANT_PILOT.md) measures independent post-task comprehension separately from viewing chat explanations.
 
 ## Design goals → mechanisms
 

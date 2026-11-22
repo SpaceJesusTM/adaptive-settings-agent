@@ -2,8 +2,8 @@
 
 Adaptive Settings Agent is a CSC2524 HCI research prototype for exploring whether conversational guidance can make complex settings easier to find, understand and change while keeping the menu familiar. VALORANT and Counter-Strike 2 (CS2) serve as examples of settings interfaces with many controls, dependencies and trade-offs.
 
-- **Baseline (A)** provides both games’ canonical navigation, search, manual controls and change history with undo.
-- **Adaptive (B)** keeps the same catalogues, row order and manual controls. It adds conversational explanations, goal-based recommendations, contextual *Relevant now* cards, and pins and locks. The user reviews and explicitly applies proposed changes, and can undo them from history.
+- **Baseline (A)** provides both games’ canonical navigation (`315` verified/labelled settings: `177` VALORANT incl. 15-profile Crosshair editor & live SVG preview + `138` CS2 incl. HUD Edge Positions safezone preview & `New` tab), search, manual controls and change history with undo.
+- **Adaptive (B)** keeps the same catalogues, row order and manual controls. It defaults to a clutter-free **Participant view** (hiding condition pills, scenario resets, model IDs and raw traces behind an **Experimenter** toggle) and unifies **Changes** (idempotently auto-staged from chat without auto-applying), **Pinned** (direct manual controls that respect user authority even over AI locks), and **Discover** (proactive/cross-game cards) inside a docked or detachable (`/?view=workspace`) **Adaptive Workspace**.
 - **Preferences** distinguish temporary goals from confirmed durable preferences. Cross-game recommendations can use priorities such as visibility or input latency while leaving each game’s values independent.
 
 The project is an unofficial simulation and has no affiliation with Riot Games or Valve. Settings changes apply only to the prototype’s SQLite database. Hardware and context events are simulated, the prototype measures no in-game performance, and no human-participant study has been conducted. Some catalogue entries have partially verified paths, bounds, or defaults. The catalogue records those distinctions.
@@ -12,7 +12,7 @@ The project is an unofficial simulation and has no affiliation with Riot Games o
 
 React, TypeScript and Zustand render the two game menus. Vite proxies browser requests to FastAPI during development. The backend loads versioned JSON catalogues and synthetic scenarios, and SQLite stores values, preferences, history, and proposal state. FastAPI can also serve the production bundle on one port.
 
-LangGraph orchestrates the assistant and uses LangChain’s `ChatOllama` integration for local inference. The model can request read-only lookups and produce a schema-constrained answer. Backend validation checks proposed IDs, values, dependencies and locks, and the apply endpoint rechecks them when the user confirms. An explicitly labelled rule-based fallback works without Ollama. See the [API reference](docs/API.md), [catalogue report](docs/CATALOG_REPORT.md), and [research notes](docs/PAPER_IMPLEMENTATION_NOTES.md).
+LangGraph orchestrates the assistant and uses LangChain’s `ChatOllama` integration for local inference. An intent-scope classifier (`explain_only`, `single_setting`, `focused`, `category_optimization`, `full_game_setup`) and deterministic coverage planner let the model request read-only lookups and produce schema-constrained recommendations (with per-category batching for comprehensive setups). Backend validation checks proposed IDs, values, dependencies and locks, auto-stages validated changes idempotently for user review, and rechecks them atomically when the user confirms Apply. An explicitly labelled rule-based fallback works without Ollama. See the [API reference](docs/API.md), [catalogue report](docs/CATALOG_REPORT.md), [completeness audit](docs/SETTINGS_COMPLETENESS_AUDIT.md), [design audit](docs/NEXT_PASS_DESIGN_AUDIT.md), [research rationale](docs/RESEARCH_RATIONALE.md), [pilot protocol](docs/PARTICIPANT_PILOT.md), and [research notes](docs/PAPER_IMPLEMENTATION_NOTES.md).
 
 ## Prerequisites
 
@@ -88,7 +88,7 @@ npm --prefix frontend run build
 npm --prefix frontend run e2e
 ```
 
-The build includes TypeScript checks. Browser journeys use a dedicated test database and offline rules. For browser journeys, Windows uses Edge by default. On macOS install Chromium once with `npm --prefix frontend exec -- playwright install chromium`. Use `PW_CHANNEL=chromium` to select Playwright’s Chromium explicitly. CI uses Chromium on Windows and macOS and requires no Ollama service or repository secrets.
+The build includes TypeScript checks. Browser journeys use a dedicated test database and offline rules. For browser journeys, Windows uses Edge by default. On macOS install Chromium once with `npm --prefix frontend exec -- playwright install chromium`, or run against system Chrome with `PW_CHANNEL=chrome npm --prefix frontend run e2e`. CI uses Chromium on Windows and macOS and requires no Ollama service or repository secrets.
 
 Use `python scripts/dev.py --backend` and `python scripts/dev.py --frontend` in separate terminals when you want independent logs. Use `python scripts/dev.py --serve` for the built application at port 8765. When a port is busy, change it in `.env` and restart both processes. Use `python scripts/smoke_check.py --backend --real-model` while the backend and Ollama are running to check the configured live model.
 
