@@ -1,0 +1,13 @@
+{
+  "name": "default",
+  "title": "Study start: VALORANT regular, CS2 newcomer",
+  "description": "Synthetic demo state. VALORANT uses a plausible high-quality configuration (catalogue sample values); CS2 matches its High video preset with V-Sync on, Reflex off and Boost Player Contrast off. No saved preferences, pins or locks.",
+  "synthetic": true,
+  "hardware": {"label": "Simulated gaming PC", "gpuVendor": "NVIDIA", "gpu": "Simulated NVIDIA GPU (8 GB VRAM)", "cpuCores": 12, "ramGB": 16, "vramGB": 8, "displayRefreshHz": 144, "gsyncDisplay": false},
+  "session": {"condition": "baseline", "selectedGame": "valorant", "aiMode": "local", "adaptationEnabled": true},
+  "values": {},
+  "preferences": [],
+  "evidence": [],
+  "pins": {},
+  "locks": {}
+}

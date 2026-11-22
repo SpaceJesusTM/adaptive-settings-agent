@@ -1,0 +1,22 @@
+{
+  "name": "valorant_history_new_cs2",
+  "title": "New CS2 player with VALORANT history",
+  "description": "Synthetic: the player saved lasting preferences for low input latency and clear player visibility while using VALORANT (seeded evidence below). CS2 is close to a fresh install. Used for the cross-game walkthrough when a live VALORANT session is not run first.",
+  "synthetic": true,
+  "hardware": {"label": "Simulated gaming PC", "gpuVendor": "NVIDIA", "gpu": "Simulated NVIDIA GPU (8 GB VRAM)", "cpuCores": 12, "ramGB": 16, "vramGB": 8, "displayRefreshHz": 144, "gsyncDisplay": false},
+  "session": {"condition": "adaptive", "selectedGame": "cs2", "aiMode": "local", "adaptationEnabled": true},
+  "values": {
+    "valorant": {"val.video.vsync": "off", "val.video.nvidia_reflex": "on", "val.video.vignette": "off"}
+  },
+  "preferences": [
+    {"dimension": "input_latency", "direction": "prioritize", "scope": "durable", "originGame": "valorant", "game": "valorant", "source": "seed", "note": "Seeded scenario: saved while playing VALORANT"},
+    {"dimension": "visibility", "direction": "prioritize", "scope": "durable", "originGame": "valorant", "game": "valorant", "source": "seed", "note": "Seeded scenario: saved while playing VALORANT"}
+  ],
+  "evidence": [
+    {"kind": "applied", "dimension": "input_latency", "game": "valorant", "settingId": "val.video.vsync", "detail": "Applied VSync: On -> Off in VALORANT (seeded history)"},
+    {"kind": "applied", "dimension": "input_latency", "game": "valorant", "settingId": "val.video.nvidia_reflex", "detail": "Applied NVIDIA Reflex Low Latency: Off -> On in VALORANT (seeded history)"},
+    {"kind": "applied", "dimension": "visibility", "game": "valorant", "settingId": "val.video.vignette", "detail": "Applied Vignette: On -> Off in VALORANT (seeded history)"}
+  ],
+  "pins": {},
+  "locks": {}
+}

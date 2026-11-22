@@ -1,0 +1,13 @@
+{
+  "name": "locked_settings",
+  "title": "Adaptive condition with locked settings",
+  "description": "Synthetic: same values as 'default' but in the adaptive condition, with VALORANT VSync and Material Quality locked from AI changes. Used to demonstrate that locks are honoured even if the model proposes them.",
+  "synthetic": true,
+  "hardware": {"label": "Simulated gaming PC", "gpuVendor": "NVIDIA", "gpu": "Simulated NVIDIA GPU (8 GB VRAM)", "cpuCores": 12, "ramGB": 16, "vramGB": 8, "displayRefreshHz": 144, "gsyncDisplay": false},
+  "session": {"condition": "adaptive", "selectedGame": "valorant", "aiMode": "local", "adaptationEnabled": true},
+  "values": {},
+  "preferences": [],
+  "evidence": [],
+  "pins": {"valorant": ["val.video.material_quality"]},
+  "locks": {"valorant": ["val.video.vsync", "val.video.material_quality"]}
+}

@@ -1,0 +1,13 @@
+{
+  "name": "amd_pc",
+  "title": "Simulated AMD PC (hardware-dependent availability)",
+  "description": "Synthetic: identical to 'default' but the simulated PC has an AMD GPU, so NVIDIA Reflex options are unavailable and VALORANT's AMD Anti-Lag 2 becomes available. Demonstrates that vendor-specific options are not assumed for every PC.",
+  "synthetic": true,
+  "hardware": {"label": "Simulated gaming PC (AMD)", "gpuVendor": "AMD", "gpu": "Simulated AMD Radeon GPU (8 GB VRAM)", "cpuCores": 12, "ramGB": 16, "vramGB": 8, "displayRefreshHz": 144, "gsyncDisplay": false},
+  "session": {"condition": "adaptive", "selectedGame": "valorant", "aiMode": "local", "adaptationEnabled": true},
+  "values": {},
+  "preferences": [],
+  "evidence": [],
+  "pins": {},
+  "locks": {}
+}
