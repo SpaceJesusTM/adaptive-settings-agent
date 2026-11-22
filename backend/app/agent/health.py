@@ -54,10 +54,11 @@ async def probe_ollama(settings: Settings, *, force: bool = False) -> dict[str, 
                     caps = data.get("capabilities", []) or []
                     if not isinstance(det, dict) or not isinstance(caps, list) or any(not isinstance(cap, str) for cap in caps):
                         raise ValueError("Invalid Ollama model metadata.")
-                    result["details"] = {"family": det.get("family"), "parameterSize": det.get("parameter_size"),
-                                         "quantization": det.get("quantization_level"), "format": det.get("format")}
-                    if any(value is not None and not isinstance(value, str) for value in result["details"].values()):
+                    details = {"family": det.get("family"), "parameterSize": det.get("parameter_size"),
+                               "quantization": det.get("quantization_level"), "format": det.get("format")}
+                    if any(value is not None and not isinstance(value, str) for value in details.values()):
                         raise ValueError("Invalid Ollama model details.")
+                    result["details"] = details
                     result["capabilities"] = caps
                     result.update(state="connected", message="Connected to the local model through Ollama.")
         except httpx.InvalidURL:

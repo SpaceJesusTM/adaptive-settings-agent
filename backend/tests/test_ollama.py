@@ -15,6 +15,7 @@ from app.agent.health import probe_ollama
     ("missing", "missing from this Ollama"),
     ("bad_json", "malformed status data"),
     ("bad_shape", "malformed status data"),
+    ("bad_details", "malformed status data"),
     ("unreadable_model", "HTTP 500"),
     ("ready", "Connected to the local model"),
 ])
@@ -37,6 +38,8 @@ def test_ollama_status(settings, monkeypatch, case, message):
             case "/api/show":
                 if case == "unreadable_model":
                     return httpx.Response(500)
+                if case == "bad_details":
+                    return httpx.Response(200, json={"details": {"family": {"bad": "field"}}})
                 return httpx.Response(200, json={"details": {"quantization_level": "Q4_K_M"}, "capabilities": ["tools"]})
         pytest.fail(f"Unexpected request to {request.url.path}")
 
@@ -48,6 +51,8 @@ def test_ollama_status(settings, monkeypatch, case, message):
     if case == "ready":
         assert result["details"]["quantization"] == "Q4_K_M"
         assert result["capabilities"] == ["tools"]
+    else:
+        assert result["details"] is None
 
 
 def test_no_model_configured_skips_network(settings, monkeypatch):
