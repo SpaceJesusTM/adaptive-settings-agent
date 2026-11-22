@@ -9,6 +9,7 @@ export function displayValue(setting: Setting | undefined, value: Value | undefi
   if (setting.controlType === "slider") {
     const n = Number(value);
     if (Number.isNaN(n)) return String(value);
+    if (setting.key === "fps_max_ui" && n === 0) return "Unlimited";
     if (setting.display === "percent") return `${Math.round(n * 100)}%`;
     const dec = setting.precision ?? 2;
     const text = n.toFixed(dec);
@@ -16,6 +17,7 @@ export function displayValue(setting: Setting | undefined, value: Value | undefi
     return setting.unit ? `${text} ${setting.unit}` : text;
   }
   if (setting.controlType === "keybind") return value === "" ? "–" : String(value);
+  if (setting.controlType === "color") return String(value).toUpperCase();
   return String(value);
 }
 

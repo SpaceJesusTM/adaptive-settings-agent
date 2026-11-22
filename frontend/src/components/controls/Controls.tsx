@@ -172,6 +172,60 @@ export function KeybindControl({ game, setting, value, disabled, onChange, label
   );
 }
 
+export function ColorControl({ setting, value, disabled, onChange, labelId }: ControlProps) {
+  const committed = /^#[0-9a-f]{6}$/i.test(String(value ?? "")) ? String(value).toUpperCase() : "#FFFFFF";
+  const [hex, setHex] = useState(committed);
+
+  useEffect(() => {
+    setHex(committed);
+  }, [committed]);
+
+  const commitHex = (raw: string) => {
+    let cleaned = raw.trim().toUpperCase();
+    if (!cleaned.startsWith("#")) cleaned = `#${cleaned}`;
+    if (/^#[0-9A-F]{3}$/.test(cleaned)) {
+      cleaned = "#" + cleaned.slice(1).split("").map((c) => c + c).join("");
+    }
+    if (/^#[0-9A-F]{6}$/.test(cleaned)) {
+      setHex(cleaned);
+      if (cleaned !== committed) onChange(cleaned);
+    } else {
+      setHex(committed);
+    }
+  };
+
+  return (
+    <div className="ctl-color">
+      <input
+        type="color"
+        className="ctl-color-picker"
+        aria-labelledby={labelId}
+        aria-label={`${setting.exactLabel} color picker`}
+        value={committed}
+        disabled={disabled}
+        onChange={(e) => {
+          const v = e.target.value.toUpperCase();
+          setHex(v);
+          onChange(v);
+        }}
+      />
+      <input
+        type="text"
+        className="ctl-color-hex"
+        aria-label={`${setting.exactLabel} hex value`}
+        value={hex}
+        maxLength={7}
+        disabled={disabled}
+        onChange={(e) => setHex(e.target.value)}
+        onBlur={() => commitHex(hex)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") commitHex(hex);
+        }}
+      />
+    </div>
+  );
+}
+
 export function SettingControl(props: ControlProps) {
   switch (props.setting.controlType) {
     case "segmented":
@@ -183,6 +237,8 @@ export function SettingControl(props: ControlProps) {
       return <SliderControl {...props} />;
     case "keybind":
       return <KeybindControl {...props} />;
+    case "color":
+      return <ColorControl {...props} />;
     default:
       return null;
   }

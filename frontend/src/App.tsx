@@ -1,7 +1,8 @@
 import { useEffect } from "react";
 import type { GameId } from "./api/types";
+import { AdaptiveWorkspace } from "./adaptive/AdaptiveWorkspace";
 import { AssistantPanel } from "./adaptive/AssistantPanel";
-import { ReviewTray } from "./adaptive/ReviewTray";
+import { StandaloneWorkspace } from "./adaptive/StandaloneWorkspace";
 import { HistoryDrawer, Toasts } from "./components/chrome/HistoryDrawer";
 import { StudyBar } from "./components/chrome/StudyBar";
 import { useGameView } from "./components/settings/useGameView";
@@ -47,6 +48,17 @@ export function App() {
   }
   if (!ready || !session) return <div className="boot">Loading the simulated settings…</div>;
 
+  const isDetachedWorkspace = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("view") === "workspace";
+  if (isDetachedWorkspace) {
+    return (
+      <>
+        <StandaloneWorkspace />
+        <HistoryDrawer />
+        <Toasts />
+      </>
+    );
+  }
+
   const game = session.selectedGame;
   const adaptive = session.condition === "adaptive";
   return (
@@ -56,7 +68,7 @@ export function App() {
         <GameSurface game={game} />
         {adaptive ? <AssistantPanel game={game} /> : null}
       </main>
-      {adaptive ? <ReviewTray game={game} /> : null}
+      {adaptive ? <AdaptiveWorkspace game={game} mode="docked" /> : null}
       <HistoryDrawer />
       <Toasts />
     </div>

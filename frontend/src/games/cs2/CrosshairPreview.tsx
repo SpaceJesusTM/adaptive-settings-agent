@@ -7,7 +7,7 @@ const BACKGROUNDS = [
   "linear-gradient(180deg, #e8e4da 0%, #f4f1ea 50%, #b8b1a3 51%, #9a927f 100%)",
 ];
 
-/** Live, simplified drawing of the CS2 crosshair from the simulated values (static: no spread animation). */
+/** Live preview of CS2 crosshair using simulated style, size, gap, outline, color & alpha. */
 export function CrosshairPreview({ values }: { values: Record<string, Value> }) {
   const [bg, setBg] = useState(0);
   const style = String(values["cs2.crosshair.xhair_style"] ?? "7");
@@ -17,9 +17,11 @@ export function CrosshairPreview({ values }: { values: Record<string, Value> }) 
   const dot = String(values["cs2.crosshair.xhair_center_dot"] ?? "0") === "1" || style === "6";
   const tStyle = String(values["cs2.crosshair.xhair_t"] ?? "0") === "1";
   const outline = String(values["cs2.crosshair.xhair_outline"] ?? "1");
+  const color = String(values["cs2.crosshair.xhair_color_hex"] ?? "#00FF00");
+  const alpha = Math.max(0, Math.min(255, Number(values["cs2.crosshair.xhair_alpha"] ?? 200))) / 255;
+
   const cx = 160;
   const cy = 90;
-  const color = "#f2f2f2";
   const stroke = outline === "0" ? "none" : "#000";
   const sw = outline === "0" ? 0 : 1;
 
@@ -37,23 +39,25 @@ export function CrosshairPreview({ values }: { values: Record<string, Value> }) 
   return (
     <div className="cs2-xhair-preview" style={{ background: BACKGROUNDS[bg] }}>
       <svg viewBox="0 0 320 180" role="img" aria-label="Crosshair preview (simulated)">
-        {bars.map((b) => (
-          <rect key={b.side} x={b.x} y={b.y} width={b.w} height={b.h} fill={color}
-            stroke={outline === "2" && (b.side === "bottom" || b.side === "right") ? "none" : stroke} strokeWidth={sw} />
-        ))}
-        {["3", "1"].includes(style) ? <circle cx={cx} cy={cy} r={r} fill="none" stroke={color} strokeWidth={t} /> : null}
-        {style === "8" ? <rect x={cx - r} y={cy - r} width={r * 2} height={r * 2} fill="none" stroke={color} strokeWidth={t} /> : null}
-        {quad
-          ? [[-1, -1], [1, -1], [-1, 1], [1, 1]].map(([sx, sy]) => (
-              <path key={`${sx}${sy}`} d={`M ${cx + sx * gap} ${cy + sy * (gap + len)} L ${cx + sx * gap} ${cy + sy * gap} L ${cx + sx * (gap + len)} ${cy + sy * gap}`}
-                fill="none" stroke={color} strokeWidth={t} />
-            ))
-          : null}
-        {dot ? <rect x={cx - t / 2} y={cy - t / 2} width={t} height={t} fill={color} stroke={stroke} strokeWidth={sw} /> : null}
+        <g opacity={alpha}>
+          {bars.map((b) => (
+            <rect key={b.side} x={b.x} y={b.y} width={b.w} height={b.h} fill={color}
+              stroke={outline === "2" && (b.side === "bottom" || b.side === "right") ? "none" : stroke} strokeWidth={sw} />
+          ))}
+          {["3", "1"].includes(style) ? <circle cx={cx} cy={cy} r={r} fill="none" stroke={color} strokeWidth={t} /> : null}
+          {style === "8" ? <rect x={cx - r} y={cy - r} width={r * 2} height={r * 2} fill="none" stroke={color} strokeWidth={t} /> : null}
+          {quad
+            ? [[-1, -1], [1, -1], [-1, 1], [1, 1]].map(([sx, sy]) => (
+                <path key={`${sx}${sy}`} d={`M ${cx + sx * gap} ${cy + sy * (gap + len)} L ${cx + sx * gap} ${cy + sy * gap} L ${cx + sx * (gap + len)} ${cy + sy * gap}`}
+                  fill="none" stroke={color} strokeWidth={t} />
+              ))
+            : null}
+          {dot ? <rect x={cx - t / 2} y={cy - t / 2} width={t} height={t} fill={color} stroke={stroke} strokeWidth={sw} /> : null}
+        </g>
       </svg>
       <button type="button" className="cs2-xhair-arrow left" aria-label="Previous preview background" onClick={() => setBg((bg + BACKGROUNDS.length - 1) % BACKGROUNDS.length)}>‹</button>
       <button type="button" className="cs2-xhair-arrow right" aria-label="Next preview background" onClick={() => setBg((bg + 1) % BACKGROUNDS.length)}>›</button>
-      <span className="cs2-xhair-caption">Preview (simplified, static — colour not simulated)</span>
+      <span className="cs2-xhair-caption">Preview (simplified, static — color &amp; alpha live)</span>
     </div>
   );
 }

@@ -71,7 +71,7 @@ export function SettingRow({ setting, view }: { setting: Setting; view: GameView
             {locked ? <span className="flag flag-lock" title="Locked from AI changes (you can still edit it)">🔒</span> : null}
             {staged ? (
               <button type="button" className="chip chip-staged" title={`Staged suggestion: ${staged.item.label} → ${staged.item.effectiveDisplay}. Not applied yet.`}
-                onClick={() => useAppStore.getState().setTrayOpen(true)}>
+                onClick={() => useAppStore.getState().openWorkspace("changes")}>
                 Staged → {staged.item.effectiveDisplay}
               </button>
             ) : null}

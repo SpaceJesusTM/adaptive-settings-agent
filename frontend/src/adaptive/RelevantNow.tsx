@@ -34,99 +34,96 @@ export function RelevantNow({ game }: { game: GameId }) {
   const refresh = useAppStore((s) => s.refreshRelevantNow);
   const dismiss = useAppStore((s) => s.dismissCard);
   const stage = useAppStore((s) => s.stage);
-  const goToSetting = useAppStore((s) => s.goToSetting);
+  const requestFocus = useAppStore((s) => s.requestFocusInMainWindow);
+  const togglePin = useAppStore((s) => s.togglePin);
+  const pins = useAppStore((s) => s.states[game]?.pins ?? EMPTY);
   const triggerContext = useAppStore((s) => s.triggerContext);
-  const [collapsed, setCollapsed] = useState(false);
   const [dismissing, setDismissing] = useState<string | null>(null);
   const anyOpen = (rn?.items ?? []).some((c) => openCards[c.cardId]);
 
   return (
-    <section className="rn" aria-label="Relevant now">
+    <section className="rn" aria-label="Discover suggestions">
       <header className="rn-head">
-        <button type="button" className="rn-title" aria-expanded={!collapsed} onClick={() => setCollapsed((c) => !c)}>
-          Relevant now <span className="rn-count">{(rn?.items ?? []).filter((c) => c.state === "suggested").length}</span>
-        </button>
-        <span className="rn-sub">Rule-based · from your goals, saved preferences and simulated context</span>
+        <span className="rn-title">
+          Discover <span className="rn-count">{(rn?.items ?? []).filter((c) => c.state === "suggested").length}</span>
+        </span>
+        <span className="rn-sub">Unsolicited suggestions from your goals and saved preferences — never added to Changes until you prepare them.</span>
       </header>
-      {collapsed ? null : (
-        <>
-          {rn?.context ? (
-            <div className="rn-context" role="note">
-              <span className="sim-tag">Simulated event</span> {rn.context.label}
-              <button type="button" className="link" onClick={() => void triggerContext(game, null)}>clear</button>
-            </div>
-          ) : null}
-          {rn?.disabled ? <p className="rn-empty">Proactive suggestions are switched off (Study controls → Adaptation).</p> : null}
-          {rn?.updateAvailable ? (
-            <div className="rn-update">
-              <span>New suggestions are available based on newer evidence.</span>
-              <button type="button" className="btn btn-small" disabled={anyOpen} title={anyOpen ? "Close the open card first — cards never reshuffle while you are reading one." : undefined}
-                onClick={() => void refresh(game)}>Refresh</button>
-            </div>
-          ) : null}
-          {!rn?.disabled && (rn?.items ?? []).length === 0 ? (
-            <p className="rn-empty">
-              {rn?.updateAvailable
-                ? "Refresh to see suggestions for your current goals."
-                : rn?.hasEvidence
-                  ? "Your current settings already match your goals (or the relevant settings are locked or staged)."
-                  : "No suggestions yet. Describe a goal in the chat, save a preference, or trigger a simulated event in Study controls."}
-            </p>
-          ) : null}
-          <div className="rn-cards">
-            {(rn?.items ?? []).map((c) => (
-              <div key={c.cardId} className="rn-card-wrap">
-                <RecommendationCard
-                  card={toCard(c)}
-                  open={Boolean(openCards[c.cardId])}
-                  onToggle={(o) => setCardOpen(c.cardId, o)}
-                  onShow={() => goToSetting(game, c.settingId, "assistant")}
-                  onStage={() => void stage(game, [c], "rules", null, `Relevant now: ${c.label}`)}
-                  onDismiss={() => setDismissing(c.cardId)}
-                />
-                {dismissing === c.cardId ? (
-                  <div className="dismiss-box" role="group" aria-label={`Why dismiss ${c.label}?`}>
-                    <span>Why dismiss? (kept as feedback; it will not reappear unless your goals change)</span>
-                    {DISMISS_REASONS.map((r) => (
-                      <button key={r} type="button" className="btn btn-small" onClick={() => { void dismiss(game, c.settingId, r); setDismissing(null); }}>{r}</button>
-                    ))}
-                    <button type="button" className="btn btn-small btn-ghost" onClick={() => setDismissing(null)}>Cancel</button>
-                  </div>
-                ) : null}
-              </div>
-            ))}
-          </div>
-        </>
-      )}
-    </section>
-  );
-}
-
-export function PinnedStrip({ game }: { game: GameId }) {
-  const pins = useAppStore((s) => s.states[game]?.pins ?? EMPTY);
-  const byId = useAppStore((s) => s.byId[game]);
-  const values = useAppStore((s) => s.states[game]?.values);
-  const goToSetting = useAppStore((s) => s.goToSetting);
-  if (!pins.length || !byId) return null;
-  return (
-    <section className="pinned" aria-label="Pinned settings">
-      <span className="pinned-title">📌 Pinned</span>
-      <ul>
-        {pins.map((id) => {
-          const s = byId[id];
-          if (!s) return null;
-          const v = values?.[id]?.value;
-          const label = s.validOptions?.find((o) => o.value === String(v))?.label ?? String(v ?? "");
+      {rn?.context ? (
+        <div className="rn-context" role="note">
+          <span className="sim-tag">Simulated event</span> {rn.context.label}
+          <button type="button" className="link" onClick={() => void triggerContext(game, null)}>
+            clear
+          </button>
+        </div>
+      ) : null}
+      {rn?.disabled ? <p className="rn-empty">Proactive Discover suggestions are switched off (Study controls → Adaptation).</p> : null}
+      {rn?.updateAvailable ? (
+        <div className="rn-update">
+          <span>New suggestions are available based on newer goals or preferences.</span>
+          <button
+            type="button"
+            className="btn btn-small"
+            disabled={anyOpen}
+            title={anyOpen ? "Close the open card first — cards never reshuffle while you are examining one." : undefined}
+            onClick={() => void refresh(game)}
+          >
+            Refresh
+          </button>
+        </div>
+      ) : null}
+      {!rn?.disabled && (rn?.items ?? []).length === 0 ? (
+        <p className="rn-empty">
+          {rn?.updateAvailable
+            ? "Refresh to see suggestions for your current goals."
+            : rn?.hasEvidence
+              ? "Your current settings already match your goals (or the relevant settings are locked or queued in Changes)."
+              : "No proactive suggestions yet. Describe a goal in chat or save a preference to see relevant settings."}
+        </p>
+      ) : null}
+      <div className="rn-cards">
+        {(rn?.items ?? []).map((c) => {
+          const isPinned = pins.includes(c.settingId);
           return (
-            <li key={id}>
-              <button type="button" className="pin-chip" title={`${s.canonicalPath} — go to setting`} onClick={() => goToSetting(game, id, "pin")}>
-                <span>{s.exactLabel}</span>
-                {s.controlType !== "slider" ? <em>{label}</em> : null}
-              </button>
-            </li>
+            <div key={c.cardId} className="rn-card-wrap">
+              <RecommendationCard
+                card={toCard(c)}
+                open={Boolean(openCards[c.cardId])}
+                onToggle={(o) => setCardOpen(c.cardId, o)}
+                onShow={() => requestFocus(game, c.settingId)}
+                onStage={() => void stage(game, [c], "rules", null, `Discover: ${c.label}`)}
+                onDismiss={() => setDismissing(c.cardId)}
+                extraActions={
+                  <button type="button" className="btn btn-small btn-ghost" onClick={() => void togglePin(game, c.settingId)}>
+                    {isPinned ? "Unpin" : "Pin"}
+                  </button>
+                }
+              />
+              {dismissing === c.cardId ? (
+                <div className="dismiss-box" role="group" aria-label={`Why dismiss ${c.label}?`}>
+                  <span>Why dismiss? (It will not reappear unless your goals change.)</span>
+                  {DISMISS_REASONS.map((r) => (
+                    <button
+                      key={r}
+                      type="button"
+                      className="btn btn-small"
+                      onClick={() => {
+                        void dismiss(game, c.settingId, r);
+                        setDismissing(null);
+                      }}
+                    >
+                      {r}
+                    </button>
+                  ))}
+                  <button type="button" className="btn btn-small btn-ghost" onClick={() => setDismissing(null)}>
+                    Cancel
+                  </button>
+                </div>
+              ) : null}
+            </div>
           );
         })}
-      </ul>
+      </div>
     </section>
   );
 }

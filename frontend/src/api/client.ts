@@ -3,15 +3,18 @@ import type {
   Catalog,
   ChatMessage,
   ContextEventType,
+  CrosshairProfile,
   GameId,
   GameState,
   HistoryBatch,
   ModelStatus,
+  PlanMetadata,
   Profile,
   Proposal,
   RelevantNowSet,
   RunStatus,
   ScenarioInfo,
+  ScopeOverride,
   SearchHit,
   Session,
   Value,
@@ -92,6 +95,7 @@ export const api = {
     source: "ai" | "fallback" | "rules";
     runId?: string | null;
     title?: string;
+    plan?: PlanMetadata | null;
     items: { settingId: string; proposedValue: Value; why?: string; tradeoff?: string | null; confidence?: string; dimensions?: string[]; basedOn?: string | null }[];
   }) => request<Proposal>("POST", "/api/proposals", body),
   editItem: (proposalId: string, itemId: string, value: Value) =>
@@ -104,8 +108,34 @@ export const api = {
     }),
   rejectProposal: (proposalId: string, itemIds?: string[], reason?: string) =>
     request<Proposal>("POST", `/api/proposals/${proposalId}/reject`, { itemIds, reason }),
-  chat: (game: GameId, message: string, uiState: Record<string, unknown>) =>
-    request<RunStatus>("POST", "/api/chat", { game, message, uiState }),
+  chat: (game: GameId, message: string, uiState: Record<string, unknown>, scopeOverride?: ScopeOverride) =>
+    request<RunStatus>("POST", "/api/chat", { game, message, uiState, ...(scopeOverride ? { scopeOverride } : {}) }),
+  crosshairProfiles: () => request<CrosshairProfile[]>("GET", "/api/valorant/crosshair/profiles"),
+  createCrosshairProfile: (name: string, copyFromCurrent = true) =>
+    request<{ profiles: CrosshairProfile[]; activeProfileId: string; batch: HistoryBatch | null }>("POST", "/api/valorant/crosshair/profiles", {
+      name,
+      copyFromCurrent,
+    }),
+  selectCrosshairProfile: (profileId: string) =>
+    request<{ profiles: CrosshairProfile[]; activeProfileId: string; batch: HistoryBatch | null }>(
+      "POST",
+      `/api/valorant/crosshair/profiles/${encodeURIComponent(profileId)}/select`,
+    ),
+  renameCrosshairProfile: (profileId: string, name: string) =>
+    request<{ profiles: CrosshairProfile[] }>("PATCH", `/api/valorant/crosshair/profiles/${encodeURIComponent(profileId)}`, { name }),
+  deleteCrosshairProfile: (profileId: string) =>
+    request<{ profiles: CrosshairProfile[] }>("DELETE", `/api/valorant/crosshair/profiles/${encodeURIComponent(profileId)}`),
+  importCrosshairCode: (code: string, name?: string) =>
+    request<{ profiles: CrosshairProfile[]; activeProfileId: string; batch: HistoryBatch | null }>(
+      "POST",
+      "/api/valorant/crosshair/profiles/import",
+      { code, name },
+    ),
+  exportCrosshairCode: (profileId: string) =>
+    request<{ profileId: string; name: string; code: string; simulatedNote: string }>(
+      "GET",
+      `/api/valorant/crosshair/profiles/${encodeURIComponent(profileId)}/export`,
+    ),
   run: (runId: string) => request<RunStatus>("GET", `/api/chat/runs/${runId}`),
   cancelRun: (runId: string) => request<RunStatus>("POST", `/api/chat/runs/${runId}/cancel`),
   thread: (game: GameId) => request<ChatMessage[]>("GET", `/api/games/${game}/chat`),

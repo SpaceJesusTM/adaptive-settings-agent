@@ -5,7 +5,7 @@ export type CardState = "suggested" | "staged" | "applied" | "dismissed" | "lock
 
 const STATE_LABEL: Record<CardState, string> = {
   suggested: "Suggested",
-  staged: "Staged — awaiting your approval",
+  staged: "Ready for review",
   applied: "Applied",
   dismissed: "Dismissed",
   locked: "Locked by you",
@@ -110,13 +110,13 @@ export function RecommendationCard({
             {card.dimensionLabel ? <li>Matches the goal: <strong>{card.dimensionLabel}</strong></li> : null}
             {card.basedOn.map((b) => <li key={b}>Evidence: {b}</li>)}
             <li>Origin: {card.provenance === "ai" ? "selected by the local model, then checked against the catalogue, your locks and allowed values" : "fixed ranking rule over catalogue goal tags (not AI)"}</li>
-            <li>Nothing changes until you stage and apply it.</li>
+            <li>Nothing changes until you prepare and apply it.</li>
           </ul>
         </div>
       ) : null}
       <footer className="rec-actions">
         <button type="button" className="btn btn-small" onClick={onShow} title="Highlight this setting in its normal place in the menu">Show in settings</button>
-        {onStage && !resolved ? <button type="button" className="btn btn-small btn-primary" onClick={onStage}>Stage for review</button> : null}
+        {onStage && !resolved ? <button type="button" className="btn btn-small btn-primary" onClick={onStage}>Prepare for review</button> : null}
         <button type="button" className="btn btn-small btn-ghost" aria-expanded={showWhy} onClick={() => setShowWhy((v) => !v)}>Why this?</button>
         {extraActions}
         {onDismiss && !resolved ? <button type="button" className="btn btn-small btn-ghost" onClick={onDismiss}>Dismiss</button> : null}

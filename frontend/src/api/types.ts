@@ -3,7 +3,9 @@
 export type GameId = "valorant" | "cs2";
 export type Value = string | number;
 export type Condition = "baseline" | "adaptive";
-export type ControlType = "segmented" | "dropdown" | "slider" | "keybind" | "preset";
+export type ControlType = "segmented" | "dropdown" | "slider" | "keybind" | "preset" | "color";
+export type ScopeOverride = "auto" | "focused" | "comprehensive";
+export type WorkspaceTab = "changes" | "pinned" | "discover";
 
 export interface Option {
   value: string;
@@ -199,6 +201,9 @@ export interface ProposalItem {
   settingId: string;
   label: string;
   path: string;
+  category?: string;
+  section?: string | null;
+  applyMode?: "immediate" | "explicit";
   tabId: string;
   subtabId: string;
   controlType: ControlType;
@@ -234,6 +239,66 @@ export interface ProposalItem {
   basedOn: string | null;
 }
 
+export interface PlanCoverage {
+  evaluatedCount: number;
+  eligibleCount: number;
+  proposedCount: number;
+  alreadyAlignedCount: number;
+  alreadyStagedCount: number;
+  lockedCount: number;
+  unavailableCount: number;
+  manualCount: number;
+  byCategory: Record<
+    string,
+    {
+      evaluated: number;
+      eligible: number;
+      alreadyAligned: number;
+      alreadyStaged: number;
+      locked: number;
+      unavailable: number;
+      manual: number;
+    }
+  >;
+}
+
+export interface PlanManualConsideration {
+  settingId: string;
+  label: string;
+  path: string;
+  category: string;
+  currentDisplay: string;
+  reason: string;
+  whatItDoes: string;
+  tradeoffs: string | null;
+}
+
+export interface PlanMetadata {
+  scope: "explain_only" | "focused" | "category_optimization" | "broad_optimization" | "full_game_setup";
+  maxRecommendations: number;
+  includeMinor: boolean;
+  isSupplement: boolean;
+  reason: string;
+  inferredDimensions: string[];
+  explicitOverride?: string | null;
+  singleSettingHint?: boolean;
+  autoStage: boolean;
+  partialCoverage: boolean;
+  batchesCompleted: number;
+  batchesTotal: number;
+  coverage: PlanCoverage;
+  manualConsiderations: PlanManualConsideration[];
+}
+
+export interface CrosshairProfile {
+  id: string;
+  name: string;
+  isActive: boolean;
+  settings: Record<string, Value>;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Proposal {
   id: string;
   game: GameId;
@@ -245,6 +310,8 @@ export interface Proposal {
   createdAt: string;
   updatedAt: string;
   appliedBatchId: string | null;
+  autoStaged?: boolean;
+  plan?: PlanMetadata | null;
   items: ProposalItem[];
 }
 
@@ -318,6 +385,10 @@ export interface AssistantResponse {
   validationNotes: string[];
   provenance: Provenance;
   sessionGoalId?: string | null;
+  stagedProposalId?: string | null;
+  stagedCount?: number;
+  alreadyPendingCount?: number;
+  plan?: PlanMetadata | null;
 }
 
 export interface ChatMessage {
