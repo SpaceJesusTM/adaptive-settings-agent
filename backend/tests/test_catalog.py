@@ -60,7 +60,7 @@ def test_every_setting_has_required_provenance_fields(registry):
             assert s.sourceURL.startswith("https://"), s.id
             assert s.sourceDate, s.id
             assert s.verificationStatus, s.id
-            assert s.lastReviewed == "2026-11-21", s.id
+            assert s.lastReviewed in ("2026-11-21", "2026-11-22"), s.id
             assert s.canonicalPath.endswith(s.exactLabel if not s.qualifier else f"({s.qualifier})"), s.id
             assert s.description and s.descriptionSource, s.id
             for ref in s.sourceRefs:
@@ -79,7 +79,7 @@ def test_domains_are_consistent(registry):
                 assert value_in_domain(s, s.sampleInitialValue), s.id
             for h in s.goalHints:
                 assert all(value_in_domain(s, v) for v in h.prefer), s.id
-            if s.controlType == "keybind" or (s.controlType == "slider" and not s.rangeVerified):
+            if s.controlType == "keybind" or s.controlType == "color" or (s.controlType == "slider" and not s.rangeVerified):
                 assert not s.aiProposable, s.id
 
 
@@ -177,3 +177,20 @@ def test_loader_rejects_proposable_keybind():
     kb["aiProposable"] = True
     with pytest.raises(CatalogError):
         build_catalog(RawCatalog.model_validate(data))
+
+
+def test_valorant_crosshair_stats_vo_and_cs2_hud_edge_exist(registry):
+    assert registry.setting("valorant", "val.crosshair.use_advanced_options") is not None
+    assert registry.setting("valorant", "val.crosshair.primary_color") is not None
+    assert registry.setting("valorant", "val.crosshair.ads_inner_length").availability.enabledWhen.setting == "use_advanced_options"
+    assert registry.setting("valorant", "val.video.client_fps") is not None
+    assert registry.setting("valorant", "val.audio.speaker_configuration") is not None
+    assert registry.setting("valorant", "val.audio.vo_agent_flavor") is not None
+    hx = registry.setting("cs2", "cs2.video.hud_edge_x")
+    hy = registry.setting("cs2", "cs2.video.hud_edge_y")
+    assert hx is not None and hy is not None
+    assert hx.applyMode == "immediate" and hy.applyMode == "immediate"
+    assert registry.setting("cs2", "cs2.video.brightness") is not None
+    assert registry.setting("cs2", "cs2.video.fps_max_ui") is not None
+    assert registry.setting("cs2", "cs2.audio.voice_threshold") is not None
+    assert registry.setting("cs2", "cs2.crosshair.xhair_color_hex").controlType == "color"

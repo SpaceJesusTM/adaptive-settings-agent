@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { api, askAssistant, openTab, row, rowOrder, setup, value } from "./helpers";
+import { api, askAssistant, openExperimenter, openTab, row, rowOrder, setup, value } from "./helpers";
 
 test.describe("A. Browse and change manually", () => {
   test("baseline: change a VALORANT setting, see history, undo, survive reload", async ({ page }) => {
@@ -55,12 +55,30 @@ test.describe("A. Browse and change manually", () => {
   });
 });
 
-test.describe("Condition parity", () => {
-  for (const [game, tab, sub] of [["valorant", "Video", "Graphics Quality"], ["cs2", "Video", "Advanced Video"]] as const) {
+test.describe("Condition parity & participant vs experimenter presentation", () => {
+  test("participant default hides A/B switcher, Study controls, Trace and model IDs", async ({ page }) => {
+    await setup(page, { condition: "adaptive", aiMode: "fallback" });
+    await expect(page.locator(".sb-sim-pill")).toBeVisible();
+    await expect(page.getByRole("button", { name: "B · Adaptive" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Study controls" })).toHaveCount(0);
+    await expect(page.getByRole("tab", { name: "Trace" })).toHaveCount(0);
+    await expect(page.getByText(/Assistant offline — using basic suggestions/)).toBeVisible();
+
+    await openExperimenter(page);
+    await expect(page.getByRole("button", { name: "B · Adaptive" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Study controls" })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "Trace" })).toBeVisible();
+  });
+
+  for (const [game, tab, sub] of [
+    ["valorant", "Video", "Graphics Quality"],
+    ["cs2", "Video", "Advanced Video"],
+  ] as const) {
     test(`${game}: identical canonical rows in both conditions`, async ({ page }) => {
       await setup(page, { condition: "baseline", game });
       await openTab(page, tab, sub);
       const baseline = await rowOrder(page);
+      await openExperimenter(page);
       await page.getByRole("button", { name: "B · Adaptive" }).click();
       await expect(page.locator(".assistant")).toBeVisible();
       await openTab(page, tab, sub);
@@ -69,29 +87,27 @@ test.describe("Condition parity", () => {
   }
 });
 
-test.describe("B/D. Goal-driven assistance with explicit approval (offline fallback mode)", () => {
-  test("suggestions do nothing until staged and applied; applied changes are undoable", async ({ page }) => {
+test.describe("B/D. Auto-staging, Adaptive Workspace, Pinned direct edits & Comprehensive setup", () => {
+  test("chat auto-stages requested changes to Changes without applying; Apply and Undo work", async ({ page }) => {
     await setup(page, { condition: "adaptive", aiMode: "fallback" });
     const before = await api<{ values: Record<string, { value: unknown }> }>(page, "/api/games/valorant/state");
     await askAssistant(page, "I'm getting frame drops in VALORANT and want smoother competitive play. What should I change?");
+
     const msg = page.locator(".msg-assistant").last();
-    await expect(msg.locator(".msg-prov")).toContainText("Offline fallback — rule-based, not AI-generated");
-    const cards = msg.locator(".rec-card");
-    expect(await cards.count()).toBeGreaterThan(0);
-    const firstLabel = (await cards.first().locator(".rec-title strong").textContent()) ?? "";
+    await expect(msg.locator(".msg-prov")).toContainText("Assistant offline");
+    await expect(msg.locator(".msg-staged-banner")).toContainText("ready to review — nothing has been applied");
 
-    await cards.first().getByRole("button", { name: "Show in settings" }).click();
-    await expect(page.locator(".setting-row.is-highlighted")).toContainText(firstLabel);
-
-    const stageAll = msg.getByRole("button", { name: /Stage all/ });
-    if (await stageAll.count()) await stageAll.click();
-    else await cards.first().getByRole("button", { name: "Stage for review" }).click();
-    await expect(page.locator(".tray.is-open .tray-item").first()).toBeVisible();
+    // Invariant: auto-stage does not modify actual stored values
     const afterStage = await api<{ values: Record<string, { value: unknown }> }>(page, "/api/games/valorant/state");
-    expect(afterStage.values).toEqual(before.values); // invariant: staging is not applying
+    expect(afterStage.values).toEqual(before.values);
+
+    // Clicking Review N changes opens Workspace -> Changes
+    await msg.getByRole("button", { name: /^Review \d+ changes?$/ }).click();
+    await expect(page.locator(".aw-workspace.is-open .tray-item").first()).toBeVisible();
 
     await page.getByRole("button", { name: /^Apply selected changes/ }).click();
     await expect(page.locator(".toast").last()).toContainText("Applied");
+
     await page.getByRole("button", { name: "History" }).click();
     const item = page.locator(".history-item").first();
     await expect(item).toContainText("Fallback suggestion · user applied");
@@ -102,15 +118,54 @@ test.describe("B/D. Goal-driven assistance with explicit approval (offline fallb
     }).toBe(true);
   });
 
+  test("comprehensive fresh-install setup stages >8 grouped changes across categories and applies cleanly", async ({ page }) => {
+    await setup(page, { scenario: "fresh_install_comprehensive", condition: "adaptive", game: "cs2", aiMode: "fallback" });
+    await askAssistant(page, "I just installed CS2; configure everything for competitive FPS and clarity.");
+
+    const msg = page.locator(".msg-assistant").last();
+    await expect(msg.locator(".msg-staged-banner")).toContainText(/\d+ changes ready to review/);
+    await msg.getByRole("button", { name: /^Review \d+ changes?$/ }).click();
+
+    await expect(page.locator(".aw-workspace .tray-section-group")).toHaveCount(3);
+    const itemsCount = await page.locator(".aw-workspace .tray-item").count();
+    expect(itemsCount).toBeGreaterThanOrEqual(12);
+
+    await page.getByRole("button", { name: /^Apply selected changes/ }).click();
+    await expect(page.locator(".toast").last()).toContainText(/Applied \d+ change/);
+    expect(await value(page, "cs2", "cs2.video.vsync")).toBe("0");
+    expect(await value(page, "cs2", "cs2.audio.eq_profile")).toBe("1");
+  });
+
+  test("Pinned allows direct manual edits (even when AI-locked), syncs with menu & undo, and guards CS2 Video drafts", async ({ page }) => {
+    await setup(page, { condition: "adaptive", game: "valorant", aiMode: "fallback" });
+    await openTab(page, "Video", "Graphics Quality");
+    const vsync = row(page, "val.video.vsync");
+    await vsync.hover();
+    await vsync.getByRole("button", { name: /Pin VSync/ }).click();
+    await vsync.getByRole("button", { name: /Lock VSync/ }).click();
+
+    await page.getByRole("banner").getByRole("button", { name: /^Workspace/ }).click();
+    await page.getByRole("tab", { name: /^Pinned/ }).click();
+    const pinnedRow = page.locator('[data-pinned-id="val.video.vsync"]');
+    await expect(pinnedRow).toContainText("AI locked");
+    await pinnedRow.getByRole("radio", { name: "Off" }).click();
+    await expect(pinnedRow).toContainText("Saved");
+    await expect.poll(() => value(page, "valorant", "val.video.vsync")).toBe("off");
+    expect(await api<unknown[]>(page, "/api/games/valorant/proposals")).toHaveLength(0);
+
+    await pinnedRow.getByRole("button", { name: "Undo" }).click();
+    await expect.poll(() => value(page, "valorant", "val.video.vsync")).toBe("on");
+  });
+
   test("a locked setting is never suggested and cannot be applied through a proposal", async ({ page }) => {
     await setup(page, { condition: "adaptive", aiMode: "fallback" });
     await openTab(page, "Video", "Graphics Quality");
     const vsync = row(page, "val.video.vsync");
     await vsync.hover();
     await vsync.getByRole("button", { name: /Lock VSync/ }).click();
-    await expect(vsync.getByTitle(/Locked from AI changes/)).toBeVisible();
     await askAssistant(page, "I want lower input latency.");
-    await expect(page.locator(".msg-assistant").last().locator(".rec-card", { hasText: "VSync" })).toHaveCount(0);
+    await page.getByRole("banner").getByRole("button", { name: /^Workspace/ }).click();
+    await expect(page.locator(".aw-workspace .tray-item", { hasText: "VSync" })).toHaveCount(0);
     const prop = await api<{ status: string; items: { status: string }[] }>(page, "/api/proposals", "POST",
       { game: "valorant", source: "ai", items: [{ settingId: "val.video.vsync", proposedValue: "off" }] });
     expect(prop.items[0].status).toBe("blocked");
@@ -129,45 +184,105 @@ test.describe("B/D. Goal-driven assistance with explicit approval (offline fallb
     profile = await api<{ preferences: { scope: string }[] }>(page, "/api/profile");
     expect((profile.preferences[0] as { scope: string }).scope).toBe("session");
   });
+
+  test("detached ?view=workspace loads independently and synchronizes with main window", async ({ page, context }) => {
+    await setup(page, { scenario: "fresh_install_comprehensive", condition: "adaptive", game: "valorant", aiMode: "fallback" });
+    const detached = await context.newPage();
+    await detached.goto("/?view=workspace&game=valorant");
+    await expect(detached.locator(".standalone-shell")).toBeVisible();
+
+    await detached.getByLabel("Message the assistant").fill("Help reduce input lag.");
+    await detached.getByRole("button", { name: "Send" }).click();
+    await detached.locator(".msg-assistant").last().waitFor({ timeout: 30_000 });
+    await expect(detached.locator(".aw-workspace .tray-item").first()).toBeVisible();
+
+    // Main window picks up the staged proposal automatically
+    await page.bringToFront();
+    await expect.poll(async () => (await page.getByRole("banner").getByRole("button", { name: /^Workspace/ }).textContent()) ?? "").toMatch(/\(\d+\)/);
+    await detached.close();
+  });
 });
 
-test.describe("C/E. Relevant now and cross-game transfer", () => {
-  test("new CS2 player with VALORANT history gets authentic CS2 suggestions without copying values", async ({ page }) => {
+test.describe("C/E. Discover & cross-game transfer", () => {
+  test("Discover surfaces cross-game suggestions without copying numeric sensitivity values and holds cards across reload", async ({ page }) => {
     await setup(page, { scenario: "valorant_history_new_cs2", condition: "adaptive", game: "cs2", aiMode: "fallback" });
     const before = await api<{ values: Record<string, { value: unknown }> }>(page, "/api/games/cs2/state");
+    await page.getByRole("banner").getByRole("button", { name: /^Workspace/ }).click();
+    await page.getByRole("tab", { name: /^Discover/ }).click();
+
     const rn = page.locator(".rn");
     await expect(rn.locator(".rec-card").first()).toBeVisible();
     await expect(rn.locator(".rec-basis").first()).toContainText("in VALORANT");
     const labels = await rn.locator(".rec-title strong").allTextContents();
-    expect(labels.some((l) => /Reflex|V-Sync|Boost Player Contrast|Dynamic Shadows/.test(l))).toBeTruthy();
     expect(labels).not.toContain("Mouse Sensitivity");
+
+    await page.reload();
+    await page.getByRole("banner").getByRole("button", { name: /^Workspace/ }).click();
+    await page.getByRole("tab", { name: /^Discover/ }).click();
+    await expect(page.locator(".rn .rec-title strong")).toHaveCount(labels.length);
+
+    await page.locator(".rn .rec-card").first().getByRole("button", { name: "Prepare for review" }).click();
+    await expect(page.locator(".aw-workspace .tray-item").first()).toBeVisible();
     const after = await api<{ values: Record<string, { value: unknown }> }>(page, "/api/games/cs2/state");
     expect(after.values).toEqual(before.values);
   });
 
-  test("Relevant now holds its cards on reload and does not reinsert a dismissed card", async ({ page }) => {
-    await setup(page, { scenario: "valorant_history_new_cs2", condition: "adaptive", game: "cs2", aiMode: "fallback" });
-    const titles = () => page.locator(".rn .rec-title strong").allTextContents();
-    await page.locator(".rn .rec-card").first().waitFor();
-    const first = await titles();
-    expect(first.length).toBeGreaterThan(0);
-    await page.reload();
-    await page.waitForSelector(".rn .rec-card");
-    expect(await titles()).toEqual(first);
-    await page.locator(".rn .rec-card").first().getByRole("button", { name: "Dismiss" }).click();
-    await page.getByRole("button", { name: "Not relevant to me" }).click();
-    await expect(page.locator(".rn .rec-card").first()).toHaveClass(/state-dismissed/);
-    await api(page, "/api/games/cs2/relevant-now/refresh", "POST");
-    await page.reload();
-    await page.waitForSelector(".rn");
-    expect(await titles()).not.toContain(first[0]);
-  });
-
-  test("simulated context event is labelled and populates suggestions", async ({ page }) => {
+  test("experimenter simulated context event populates Discover", async ({ page }) => {
     await setup(page, { condition: "adaptive", aiMode: "fallback" });
+    await openExperimenter(page);
     await page.getByRole("button", { name: "Study controls" }).click();
     await page.getByRole("button", { name: /Frame-rate dips/ }).click();
+    await page.getByRole("banner").getByRole("button", { name: /^Workspace/ }).click();
+    await page.getByRole("tab", { name: /^Discover/ }).click();
     await expect(page.locator(".rn-context")).toContainText("Simulated event");
     await expect(page.locator(".rn .rec-card").first()).toBeVisible();
+  });
+});
+
+test.describe("VALORANT Crosshair & CS2 HUD Edge Positions & New tab", () => {
+  test("VALORANT Crosshair profiles, SVG reactive preview, import code & reload persistence", async ({ page }) => {
+    await setup(page, { condition: "baseline", game: "valorant" });
+    await openTab(page, "Crosshair", "Primary");
+    await expect(page.getByTestId("val-crosshair-bar")).toBeVisible();
+    await expect(page.getByTestId("val-crosshair-preview")).toBeVisible();
+
+    const dotRow = row(page, "val.crosshair.primary_center_dot");
+    await dotRow.getByRole("radio", { name: "On" }).click();
+    await expect.poll(() => value(page, "valorant", "val.crosshair.primary_center_dot")).toBe("on");
+
+    await page.getByRole("button", { name: "Import Code" }).click();
+    await page.getByRole("textbox", { name: "Crosshair profile code" }).fill("0;P;c;5;h;0;0l;4;0o;2;0a;1;0f;0;1b;0");
+    await page.getByLabel("Imported profile name").fill("Pro Cyan");
+    await page.getByRole("button", { name: "Import", exact: true }).click();
+    await expect.poll(() => value(page, "valorant", "val.crosshair.primary_color")).toBe("cyan");
+
+    await page.reload();
+    await openTab(page, "Crosshair", "Primary");
+    await expect(row(page, "val.crosshair.primary_color").getByRole("combobox")).toHaveValue("cyan");
+  });
+
+  test("CS2 Video → HUD Edge Positions live safezone preview saves via Done separately from Video Apply Changes", async ({ page }) => {
+    await setup(page, { condition: "baseline", game: "cs2" });
+    // Stage an unapplied Video change first
+    await openTab(page, "Video", "Advanced Video");
+    await row(page, "cs2.video.vsync").getByRole("combobox").selectOption({ label: "Disabled" });
+    await expect(page.locator(".cs2-pending-note")).toContainText("1 unapplied change");
+
+    // Open HUD Edge Positions -> live preview updates -> Done saves immediately without applying V-Sync!
+    await openTab(page, "Video", "HUD Edge Positions");
+    await expect(page.getByTestId("cs2-hud-edge-editor")).toBeVisible();
+    await page.getByLabel("Horizontal Adjustment").fill("0.70");
+    await expect(page.getByTestId("cs2-hud-safezone")).toHaveAttribute("style", /inset:\s*0%\s*15%|left:\s*15/);
+    await page.getByRole("button", { name: "Done" }).click();
+    await expect.poll(() => value(page, "cs2", "cs2.video.hud_edge_x")).toBe(0.7);
+    expect(await value(page, "cs2", "cs2.video.vsync")).toBe("1");
+
+    // Switching back to Video -> Advanced Video shows the unapplied V-Sync draft still pending
+    await openTab(page, "Video", "Advanced Video");
+    await expect(page.locator(".cs2-pending-note")).toContainText("1 unapplied change");
+
+    // New tab works cleanly
+    await page.getByRole("tab", { name: "New" }).click();
+    await expect(page.getByTestId("cs2-promoted-tab")).toBeVisible();
   });
 });

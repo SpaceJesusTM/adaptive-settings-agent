@@ -34,6 +34,13 @@ export async function openTab(page: Page, tab: string, subtab?: string) {
   if (subtab) await page.getByRole("tab", { name: new RegExp(`^${subtab}$`, "i") }).first().click();
 }
 
+export async function openExperimenter(page: Page) {
+  const btn = page.getByRole("button", { name: /^Experimenter/ });
+  if ((await btn.getAttribute("aria-pressed")) !== "true") {
+    await btn.click();
+  }
+}
+
 export function row(page: Page, settingId: string) {
   return page.locator(`[data-setting-id="${settingId}"]`);
 }

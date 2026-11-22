@@ -226,7 +226,9 @@ def test_fallback_mode_is_labelled_and_grounded(services):
     res = result["result"]
     assert result["status"] == "fallback" and res["provenance"]["source"] == "fallback"
     assert "Fallback mode" in res["provenance"]["fallbackReason"]
-    assert 1 <= len(res["recommendations"]) <= 3
+    assert res["plan"]["scope"] == "category_optimization"
+    assert 4 <= len(res["recommendations"]) <= 12
+    assert res["stagedProposalId"]
     assert all(r["settingId"].startswith("val.") for r in res["recommendations"])
 
 

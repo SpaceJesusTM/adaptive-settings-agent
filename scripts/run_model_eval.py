@@ -47,6 +47,12 @@ CASES: list[dict] = [
      "turns": ["I'm new to CS2. What should I change based on what I liked in VALORANT?"]},
     {"id": "cs2_visibility", "scenario": "default", "game": "cs2", "label": "CS2 visibility goal",
      "turns": ["I can't see enemies well in dark corners. What can I change?"]},
+    {"id": "focused_vsync", "scenario": "default", "game": "valorant", "label": "Focused single-setting ask",
+     "turns": ["Should I turn off VSync?"]},
+    {"id": "cs2_full_setup", "scenario": "fresh_install_comprehensive", "game": "cs2", "label": "CS2 comprehensive fresh-install setup",
+     "turns": ["I just installed CS2; configure everything for competitive FPS and clarity."]},
+    {"id": "well_configured", "scenario": "well_configured_competitive", "game": "valorant", "label": "Already optimal competitive state (no forced changes)",
+     "turns": ["I just installed VALORANT; configure everything for competitive FPS and clarity."]},
     {"id": "model_failure", "scenario": "default", "game": "valorant", "label": "Model unreachable -> labelled fallback",
      "turns": ["I want smoother frame rate."], "dead_endpoint": True},
 ]
@@ -96,7 +102,10 @@ async def run_case(case: dict, base_settings, out_rows: list[dict]) -> None:
                 "case": case["id"], "caseLabel": case["label"], "turn": turn_index + 1, "scenario": case["scenario"],
                 "game": case["game"], "message": message, "status": status["status"], "source": prov.get("source"),
                 "model": prov.get("modelTag") or None, "fallbackReason": prov.get("fallbackReason"),
-                "latencyMs": status.get("latencyMs"), "intent": res.get("intent"), "reply": res.get("reply"),
+                "latencyMs": status.get("latencyMs"), "intent": res.get("intent"),
+                "scope": (res.get("plan") or {}).get("scope"),
+                "stagedProposalId": res.get("stagedProposalId"), "stagedCount": res.get("stagedCount", 0),
+                "reply": res.get("reply"),
                 "knownsAndUnknowns": res.get("knownsAndUnknowns"), "goalDimensions": res.get("goalDimensions"),
                 "recommendations": [{"settingId": r["settingId"], "label": r["label"], "from": r["currentDisplay"],
                                      "to": r["proposedDisplay"], "why": r["whyForGoal"], "basedOn": r.get("basedOn")}
@@ -112,7 +121,7 @@ async def run_case(case: dict, base_settings, out_rows: list[dict]) -> None:
             out_rows.append(row)
             recs = ", ".join(f"{r['label']}: {r['from']} -> {r['to']}" for r in row["recommendations"]) or "-"
             print(f"  [{row['source'] or row['status']:8s}] {case['id']} t{turn_index + 1} {row['latencyMs']} ms | "
-                  f"intent={row['intent']} | recs: {recs} | filtered: {len(row['filtered'])}")
+                  f"scope={row['scope']} intent={row['intent']} staged={row['stagedCount']} | recs({len(row['recommendations'])}): {recs[:140]} | filtered: {len(row['filtered'])}")
         conn = svc.store.connect()
         try:
             after = svc.store.flat_values(conn, case["game"])
