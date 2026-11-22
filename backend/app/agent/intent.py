@@ -30,6 +30,13 @@ NAVIGATE_PATTERNS = [r"\bwhere (is|are|can i find|do i find)\b", r"\bfind (the )
 PREFERENCE_PATTERNS = [r"\bi (prefer|care more about|care about|value|would rather|'d rather|don't care about|do not care about)\b",
                        r"\bmore than\b", r"\bover max", r"\bjust for (today|now|this session)\b", r"\bthis session\b",
                        r"\bfrom now on\b", r"\balways\b.*\bprefer\b"]
+RECOMMEND_PATTERNS = [
+    r"\bshould i (turn|set|enable|disable|use|keep|change|lower|raise)\b",
+    r"\b(configure|optimi[sz]e) everything\b",
+    r"\b(just installed|fresh install|new install|all settings|full setup|set me up)\b",
+    r"\b(what else|anything else|minor tweaks|more tweaks|more settings|additional changes)\b",
+    r"\bwhat should i (change|set|do|adjust)\b",
+]
 SESSION_HINTS = [r"\btoday\b", r"\bthis session\b", r"\bfor now\b", r"\bjust this\b", r"\btonight\b"]
 DEPRIORITIZE_HINTS = [r"\bdon't care about\b", r"\bdo not care about\b", r"\bless important\b", r"\bnot bothered about\b"]
 
@@ -53,6 +60,8 @@ def classify(text: str) -> str:
     t = (text or "").lower()
     if _any(NAVIGATE_PATTERNS, t):
         return "navigate"
+    if _any(RECOMMEND_PATTERNS, t):
+        return "recommend"
     if _any(PREFERENCE_PATTERNS, t):
         return "preference"
     if _any(EXPLAIN_PATTERNS, t):
@@ -87,5 +96,10 @@ def first_sentence(text: str, limit: int = 160) -> str:
 def mentioned_setting_terms(text: str) -> Optional[str]:
     """Extract the noun phrase after 'what does'/'where is' style questions, for catalogue search."""
     t = (text or "").lower()
-    m = re.search(r"(what (does|do|is|are)|where (is|are)|explain|find|show me( where)?)( the)? ([a-z0-9 /\-+]+?)( do| setting| option)?[?.!]?$", t)
-    return m.group(6).strip() if m else None
+    m = re.search(
+        r"(?:what (?:does|do|is|are)|where (?:is|are)|explain|find|show me(?: where)?|"
+        r"should i (?:turn off|turn on|turn|set|enable|disable|use|keep|change|lower|raise))"
+        r"(?: the)? ([a-z0-9 /\-+]+?)(?: do| setting| option)?[?.!]?$",
+        t,
+    )
+    return m.group(1).strip() if m else None

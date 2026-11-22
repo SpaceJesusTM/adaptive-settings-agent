@@ -20,7 +20,7 @@ from .values import ValueError_, normalize_value
 ALL_TABLES = [
     "setting_values", "game_state", "change_events", "change_batches", "pins", "locks", "proposal_items",
     "proposals", "preferences", "evidence", "session_goals", "dismissals", "relevant_now", "context_events",
-    "chat_messages", "agent_runs", "kv",
+    "chat_messages", "agent_runs", "valorant_crosshair_profiles", "kv",
 ]
 AI_TABLES = ["proposal_items", "proposals", "relevant_now", "chat_messages", "agent_runs", "context_events",
              "session_goals", "dismissals"]
@@ -46,7 +46,7 @@ def load_scenario(scenario_dir: Path, name: str) -> dict[str, Any]:
 def export_state(store: Store) -> dict[str, Any]:
     conn = store.connect()
     try:
-        out: dict[str, Any] = {"format": "csc2524-state", "version": 1, "exportedAt": now_iso(), "tables": {}}
+        out: dict[str, Any] = {"format": "csc2524-state", "version": 2, "exportedAt": now_iso(), "tables": {}}
         for t in ALL_TABLES:
             rows = conn.execute(f"SELECT * FROM {t}").fetchall()
             out["tables"][t] = [dict(r) for r in rows]
@@ -63,6 +63,42 @@ def write_backup(store: Store, backup_dir: Path, reason: str) -> Path:
     return path
 
 
+def _ensure_default_crosshair_profile(store: Store, conn, ts: str) -> None:
+    count = conn.execute("SELECT COUNT(*) AS n FROM valorant_crosshair_profiles").fetchone()["n"]
+    if count > 0:
+        return
+    vals = store.flat_values(conn, "valorant")
+    xhair_settings = {k: v for k, v in vals.items() if k.startswith("val.crosshair.")}
+    conn.execute(
+        "INSERT INTO valorant_crosshair_profiles(id, name, settings_json, is_active, created_at, updated_at) "
+        "VALUES (?,?,?,1,?,?)",
+        (new_id("xhp"), "Default", dumps(xhair_settings), ts, ts),
+    )
+
+
+def sync_catalog_defaults(store: Store) -> int:
+    """Seed any newly-added catalogue settings into existing DBs without overwriting user state."""
+    conn = store.connect()
+    inserted = 0
+    ts = now_iso()
+    try:
+        with write_tx(conn):
+            for game in store.registry.games:
+                for s in store.registry.settings(game):
+                    if s.controlType == "preset":
+                        continue
+                    cur = conn.execute(
+                        "INSERT OR IGNORE INTO setting_values(game, setting_id, value_json, revision, updated_at) "
+                        "VALUES (?,?,?,0,?)",
+                        (game, s.id, dumps(s.sampleInitialValue), ts),
+                    )
+                    inserted += cur.rowcount
+            _ensure_default_crosshair_profile(store, conn, ts)
+        return inserted
+    finally:
+        conn.close()
+
+
 def import_state(store: Store, data: dict[str, Any]) -> None:
     if data.get("format") != "csc2524-state":
         raise Invalid("Not a csc2524 state export")
@@ -77,8 +113,10 @@ def import_state(store: Store, data: dict[str, Any]) -> None:
                     cols = list(row)
                     conn.execute(f"INSERT INTO {t}({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
                                  [row[c] for c in cols])
+            _ensure_default_crosshair_profile(store, conn, now_iso())
     finally:
         conn.close()
+    sync_catalog_defaults(store)
 
 
 def _seed_values(store: Store, conn, scenario: dict[str, Any]) -> None:
@@ -117,6 +155,7 @@ def reset(store: Store, scenario_dir: Path, backup_dir: Path, scenario_name: str
                     conn.execute(f"DELETE FROM {t}")
                 _seed_values(store, conn, scenario)
                 ts = now_iso()
+                _ensure_default_crosshair_profile(store, conn, ts)
                 for p in scenario.get("preferences", []):
                     conn.execute(
                         "INSERT INTO preferences(id, dimension, direction, scope, session_id, game, origin_game, source, note, active, created_at, updated_at) "
@@ -158,7 +197,7 @@ def reset(store: Store, scenario_dir: Path, backup_dir: Path, scenario_name: str
 
 
 def ensure_seeded(store: Store, scenario_dir: Path, backup_dir: Path) -> bool:
-    """Seed the default scenario on first run (empty database). Returns True if seeding happened."""
+    """Seed the default scenario on first run (empty database) and sync any new catalog settings."""
     conn = store.connect()
     try:
         empty = conn.execute("SELECT COUNT(*) AS n FROM setting_values").fetchone()["n"] == 0
@@ -166,4 +205,6 @@ def ensure_seeded(store: Store, scenario_dir: Path, backup_dir: Path) -> bool:
         conn.close()
     if empty:
         reset(store, scenario_dir, backup_dir, "default", "full", backup=False)
+    else:
+        sync_catalog_defaults(store)
     return empty

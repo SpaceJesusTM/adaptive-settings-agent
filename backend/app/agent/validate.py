@@ -63,7 +63,15 @@ def resolve_setting(store: Store, game: str, ref: str) -> tuple[Optional[Setting
     return None, f"'{ref}' is not a setting in the {game.upper()} catalogue."
 
 
-def validate_draft(store: Store, game: str, draft: AssistantDraft, *, source: str) -> dict[str, Any]:
+def validate_draft(
+    store: Store,
+    game: str,
+    draft: AssistantDraft,
+    *,
+    source: str,
+    max_recommendations: int = MAX_RECOMMENDATIONS,
+    scope_plan: Optional[Any] = None,
+) -> dict[str, Any]:
     conn = store.connect()
     try:
         values = store.flat_values(conn, game)
@@ -100,7 +108,7 @@ def validate_draft(store: Store, game: str, draft: AssistantDraft, *, source: st
             filtered.append({**base, "kind": "duplicate", "reason": f"{s.exactLabel} was suggested twice."})
             continue
         seen.add(s.id)
-        if not s.aiProposable or s.controlType in ("keybind", "preset"):
+        if not s.aiProposable or s.controlType in ("keybind", "preset", "color"):
             filtered.append({**base, "settingId": s.id, "kind": "not_proposable",
                              "reason": f"{s.exactLabel} is a personal or hardware-specific setting; the assistant does not propose values for it."})
             continue
@@ -123,8 +131,13 @@ def validate_draft(store: Store, game: str, draft: AssistantDraft, *, source: st
         if s.id in staged:
             filtered.append({**base, "settingId": s.id, "kind": "already_staged", "reason": f"{s.exactLabel} is already in your review tray."})
             continue
-        if len(recs) >= MAX_RECOMMENDATIONS:
-            filtered.append({**base, "settingId": s.id, "kind": "over_limit", "reason": "Only the first three suggestions are shown."})
+        cap = MAX_RECOMMENDATIONS if max_recommendations is None else max_recommendations
+        if cap == 0:
+            filtered.append({**base, "settingId": s.id, "kind": "over_limit", "reason": "No setting changes were requested for this question."})
+            continue
+        if len(recs) >= cap:
+            reason = "Only the first three suggestions are shown." if cap == 3 else f"Only the first {cap} suggestions are shown."
+            filtered.append({**base, "settingId": s.id, "kind": "over_limit", "reason": reason})
             continue
         why = _drop_numeric_claims(_clean(r.why_for_goal, 450), notes, f"the reason for {s.exactLabel}")
         hint_dims = [h.dimension for h in s.goalHints if any(values_equal(value, v) for v in h.prefer)]
@@ -185,7 +198,7 @@ def validate_draft(store: Store, game: str, draft: AssistantDraft, *, source: st
             prefs.append({"dimension": p.dimension, "dimensionLabel": DIMENSION_LABELS[p.dimension], "direction": p.direction,
                           "scope": p.scope, "quote": _clean(p.user_quote, 200), "game": game})
 
-    reply = _clean(draft.reply, 1100)
+    reply = _clean(draft.reply, 1800)
     reply = _drop_numeric_claims(reply, notes, "the reply")
     if CLAIMED_ACTION_RE.search(reply):
         notes.append("The reply claimed an action; nothing has been changed - suggestions only take effect when you apply them.")
@@ -196,7 +209,7 @@ def validate_draft(store: Store, game: str, draft: AssistantDraft, *, source: st
         "intent": draft.intent,
         "reply": reply,
         "knownsAndUnknowns": _drop_numeric_claims(_clean(draft.knowns_and_unknowns, 450), notes, "the uncertainty note") or None,
-        "goalDimensions": [d for d in dict.fromkeys(draft.goal_dimensions) if d in DIMENSION_LABELS][:4],
+        "goalDimensions": [d for d in dict.fromkeys(draft.goal_dimensions) if d in DIMENSION_LABELS][:5],
         "recommendations": recs,
         "explanations": explanations,
         "navigateTo": navigate,
@@ -208,11 +221,21 @@ def validate_draft(store: Store, game: str, draft: AssistantDraft, *, source: st
 
 
 ASKS_FOR_CHANGES_RE = re.compile(
-    r"\b(what should i (change|set|do)|what (can|do) i change|what to change|which settings|what settings|set me up|"
-    r"recommend|suggest|change whatever|optimi[sz]e|make (the game|it) (run )?(smoother|faster))\b", re.I)
+    r"\b(what should i (change|set|do|adjust)|what (can|do) i change|what to change|which settings|what settings|"
+    r"set me up|recommend|suggest|change whatever|optimi[sz]e|configure|fresh install|just installed|"
+    r"all settings|make (the game|it) (run )?(smoother|faster)|should i (turn|set|enable|disable|change|lower|raise))\b",
+    re.I,
+)
 
 
-def needs_repair(draft: Optional[AssistantDraft], validated: Optional[dict[str, Any]], message: str = "") -> Optional[str]:
+def needs_repair(
+    draft: Optional[AssistantDraft],
+    validated: Optional[dict[str, Any]],
+    message: str = "",
+    *,
+    scope_plan: Optional[Any] = None,
+    audit: Optional[dict[str, Any]] = None,
+) -> Optional[str]:
     """Return feedback for one repair attempt, or None if the answer is acceptable."""
     if draft is None or validated is None:
         return "The answer was not valid JSON for the required schema."
@@ -220,13 +243,22 @@ def needs_repair(draft: Optional[AssistantDraft], validated: Optional[dict[str, 
         bad = [f for f in validated["filtered"] if f["kind"] in ("unknown_or_wrong_game", "invalid_value")]
         if bad:
             return "\n".join(f"- {f['reason']}" for f in bad[:5])
+    if scope_plan is not None and getattr(scope_plan, "scope", None) == "explain_only":
+        return None
+    if audit is not None and int(audit.get("eligibleCount", 1)) == 0:
+        return None
     # The user explicitly asked what to change but got no (valid) recommendation and nothing was blocked for a
     # legitimate reason (lock, already set, unavailable): ask once more for concrete recommendations.
     if (message and ASKS_FOR_CHANGES_RE.search(message) and not validated["recommendations"]
             and draft.intent not in ("clarify", "navigate")
             and not any(f["kind"] in ("locked", "no_op", "unavailable", "already_staged", "not_proposable")
                         for f in validated["filtered"])):
-        return ("The user asked which settings to change. Use intent \"recommend\" and give 1-3 recommendations from the "
-                "SETTINGS block, using the SESSION GOAL / SAVED PREFERENCES as reasons. Do not repeat preferences that "
+        breadth_note = (
+            "grounded recommendations for all eligible improvements from the SETTINGS block"
+            if scope_plan and getattr(scope_plan, "max_recs", 3) > 3
+            else "1-3 recommendations from the SETTINGS block"
+        )
+        return (f"The user asked which settings to change. Use intent \"recommend\" and give {breadth_note}, "
+                "using the SESSION GOAL / SAVED PREFERENCES as reasons. Do not repeat preferences that "
                 "are already saved as preference_suggestions.")
     return None

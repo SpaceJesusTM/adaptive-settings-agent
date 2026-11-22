@@ -299,6 +299,10 @@ class Store:
             "INSERT INTO game_state(game, revision) VALUES (?, 1) ON CONFLICT(game) DO UPDATE SET revision = revision + 1",
             (game,),
         )
+        if game == "valorant" and any(s.id.startswith("val.crosshair.") for s, _ in effective):
+            from .crosshair import sync_active_profile_tx
+
+            sync_active_profile_tx(self, conn)
         return self.batch_summary(conn, batch_id)
 
     # ------------------------------------------------------------------ public mutations

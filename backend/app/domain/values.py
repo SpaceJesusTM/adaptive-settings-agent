@@ -96,6 +96,17 @@ def normalize_value(setting: Setting, raw: Any, *, strict: bool) -> Value:
         if key not in allowed_key_names(setting.game):
             raise ValueError_(f"'{key}' is not a recognised key name for {setting.game.upper()}")
         return key
+    if ct == "color":
+        if not isinstance(raw, str):
+            raise ValueError_(f"Color for {setting.exactLabel} must be a hex color like #00FF00")
+        txt = raw.strip().upper()
+        if not txt.startswith("#") and not strict:
+            txt = "#" + txt
+        if not strict and re.fullmatch(r"#[0-9A-F]{3}", txt):
+            txt = "#" + "".join(ch * 2 for ch in txt[1:])
+        if not re.fullmatch(r"#[0-9A-F]{6}", txt):
+            raise ValueError_(f"'{raw}' is not a valid hex color (#RRGGBB) for {setting.exactLabel}")
+        return txt
     raise ValueError_(f"Unsupported control type {ct}")
 
 
@@ -119,6 +130,8 @@ def display_value(setting: Setting, value: Any) -> str:
         return f"{text} {setting.unit}" if setting.unit and setting.unit != "%" else (f"{text}%" if setting.unit == "%" else text)
     if setting.controlType == "keybind":
         return value or "(unbound)"
+    if setting.controlType == "color":
+        return str(value).upper()
     return str(value)
 
 

@@ -18,8 +18,9 @@ from ..config import Settings
 from ..domain.db import dumps, loads, new_id, now_iso, write_tx
 from ..domain.errors import Conflict, Invalid, NotFound
 from ..domain.profile import ProfileService
+from ..domain.proposals import ProposalService
 from ..domain.store import Store
-from .fallback import fallback_draft
+from .fallback import fallback_turn
 from .graph import InvalidModelToolCall, build_turn_graph, make_chat_models
 from .health import describe_status, model_label, probe_ollama
 from .validate import validate_draft
@@ -41,18 +42,32 @@ class RunHandle:
 
 
 class AgentRunner:
-    def __init__(self, store: Store, profile: ProfileService, settings: Settings,
-                 model_factory: ModelFactory = make_chat_models):
+    def __init__(
+        self,
+        store: Store,
+        profile: ProfileService,
+        settings: Settings,
+        model_factory: ModelFactory = make_chat_models,
+        proposals: Optional[ProposalService] = None,
+    ):
         self.store = store
         self.profile = profile
         self.settings = settings
         self.model_factory = model_factory
+        self.proposals = proposals or ProposalService(store, profile)
         self._active: dict[str, RunHandle] = {}
         self._game_run: dict[str, str] = {}
         self._lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ public API
-    async def start(self, game: str, message: str, ui_state: dict[str, Any]) -> dict[str, Any]:
+    async def start(
+        self,
+        game: str,
+        message: str,
+        ui_state: dict[str, Any],
+        *,
+        scope_override: Optional[str] = None,
+    ) -> dict[str, Any]:
         self.store.require_game(game)
         text = (message or "").strip()
         if not text:
@@ -61,8 +76,11 @@ class AgentRunner:
             raise Invalid("Message is too long (1000 characters max)")
         async with self._lock:
             if game in self._game_run:
-                raise Conflict("The assistant is still answering your previous message. Wait or cancel it first.",
-                               code="run_in_progress", details={"runId": self._game_run[game]})
+                raise Conflict(
+                    "The assistant is still answering your previous message. Wait or cancel it first.",
+                    code="run_in_progress",
+                    details={"runId": self._game_run[game]},
+                )
             conn = self.store.connect()
             try:
                 session = self.store.session(conn)
@@ -73,19 +91,39 @@ class AgentRunner:
                     conn.execute(
                         "INSERT INTO agent_runs(id, game, condition, session_id, status, mode, model, goal_excerpt, started_at) "
                         "VALUES (?,?,?,?,?,?,?,?,?)",
-                        (run_id, game, session.get("condition"), session.get("sessionId"), "running",
-                         session.get("aiMode", "local"), self.settings.ollama_model or None, text[:120], now_iso()))
+                        (
+                            run_id,
+                            game,
+                            session.get("condition"),
+                            session.get("sessionId"),
+                            "running",
+                            session.get("aiMode", "local"),
+                            self.settings.ollama_model or None,
+                            text[:120],
+                            now_iso(),
+                        ),
+                    )
                     if self.settings.store_chat_history:
-                        conn.execute("INSERT INTO chat_messages(id, game, session_id, role, content_json, run_id, created_at) "
-                                     "VALUES (?,?,?,?,?,?,?)",
-                                     (new_id("msg"), game, session.get("sessionId"), "user", dumps({"text": text}), run_id, now_iso()))
+                        conn.execute(
+                            "INSERT INTO chat_messages(id, game, session_id, role, content_json, run_id, created_at) "
+                            "VALUES (?,?,?,?,?,?,?)",
+                            (
+                                new_id("msg"),
+                                game,
+                                session.get("sessionId"),
+                                "user",
+                                dumps({"text": text}),
+                                run_id,
+                                now_iso(),
+                            ),
+                        )
             finally:
                 conn.close()
             handle = RunHandle(run_id=run_id, game=game)
             handle.step("Request received")
             self._active[run_id] = handle
             self._game_run[game] = run_id
-            handle.task = asyncio.create_task(self._execute(handle, text, ui_state or {}))
+            handle.task = asyncio.create_task(self._execute(handle, text, ui_state or {}, scope_override))
         return self.status(run_id)
 
     async def cancel(self, run_id: str) -> dict[str, Any]:
@@ -110,18 +148,27 @@ class AgentRunner:
         if row is None:
             raise NotFound("Unknown run")
         if handle is not None and handle.status == "running":
-            return {"runId": run_id, "game": row["game"], "status": "running", "steps": handle.steps,
-                    "elapsedMs": round((time.perf_counter() - handle.started) * 1000)}
+            return {
+                "runId": run_id,
+                "game": row["game"],
+                "status": "running",
+                "steps": handle.steps,
+                "elapsedMs": round((time.perf_counter() - handle.started) * 1000),
+            }
         return self._row_view(row)
 
     def thread(self, game: str) -> list[dict[str, Any]]:
         conn = self.store.connect()
         try:
             sess = self.store.session(conn)
-            rows = conn.execute("SELECT * FROM chat_messages WHERE game = ? AND session_id = ? ORDER BY created_at, rowid",
-                                (game, sess["sessionId"])).fetchall()
-            return [{"id": r["id"], "role": r["role"], "runId": r["run_id"], "createdAt": r["created_at"], **loads(r["content_json"], {})}
-                    for r in rows]
+            rows = conn.execute(
+                "SELECT * FROM chat_messages WHERE game = ? AND session_id = ? ORDER BY created_at, rowid",
+                (game, sess["sessionId"]),
+            ).fetchall()
+            return [
+                {"id": r["id"], "role": r["role"], "runId": r["run_id"], "createdAt": r["created_at"], **loads(r["content_json"], {})}
+                for r in rows
+            ]
         finally:
             conn.close()
 
@@ -150,17 +197,34 @@ class AgentRunner:
     # ------------------------------------------------------------------ internals
     @staticmethod
     def _row_view(row: Any, include_result: bool = True) -> dict[str, Any]:
-        out = {"runId": row["id"], "game": row["game"], "condition": row["condition"], "status": row["status"],
-               "mode": row["mode"], "model": row["model"], "goalExcerpt": row["goal_excerpt"],
-               "steps": loads(row["steps_json"], []), "toolCalls": loads(row["tool_calls_json"], []),
-               "validation": loads(row["validation_json"], {}), "proposalIds": loads(row["proposal_ids_json"], []),
-               "error": row["error"], "latencyMs": row["latency_ms"], "startedAt": row["started_at"],
-               "finishedAt": row["finished_at"]}
+        out = {
+            "runId": row["id"],
+            "game": row["game"],
+            "condition": row["condition"],
+            "status": row["status"],
+            "mode": row["mode"],
+            "model": row["model"],
+            "goalExcerpt": row["goal_excerpt"],
+            "steps": loads(row["steps_json"], []),
+            "toolCalls": loads(row["tool_calls_json"], []),
+            "validation": loads(row["validation_json"], {}),
+            "proposalIds": loads(row["proposal_ids_json"], []),
+            "error": row["error"],
+            "latencyMs": row["latency_ms"],
+            "startedAt": row["started_at"],
+            "finishedAt": row["finished_at"],
+        }
         if include_result:
             out["result"] = loads(row["result_json"], None)
         return out
 
-    async def _execute(self, handle: RunHandle, message: str, ui_state: dict[str, Any]) -> None:
+    async def _execute(
+        self,
+        handle: RunHandle,
+        message: str,
+        ui_state: dict[str, Any],
+        scope_override: Optional[str] = None,
+    ) -> None:
         game = handle.game
         trace: list[dict[str, Any]] = []
         model_calls: list[dict[str, Any]] = []
@@ -184,13 +248,27 @@ class AgentRunner:
                 handle.step(f"Asking local model {model_label(probe)}")
                 try:
                     plan_model, compose_model = self.model_factory(self.settings)
-                    graph = build_turn_graph(store=self.store, profile=self.profile, plan_model=plan_model,
-                                             compose_model=compose_model, max_tool_rounds=self.settings.agent_max_tool_rounds,
-                                             progress=handle.step)
+                    graph = build_turn_graph(
+                        store=self.store,
+                        profile=self.profile,
+                        plan_model=plan_model,
+                        compose_model=compose_model,
+                        max_tool_rounds=self.settings.agent_max_tool_rounds,
+                        progress=handle.step,
+                        deadline_s=self.settings.agent_deadline_s,
+                    )
                     final = await asyncio.wait_for(
-                        graph.ainvoke({"game": game, "message": message, "ui_state": ui_state},
-                                      config={"recursion_limit": 25}),
-                        timeout=self.settings.agent_deadline_s)
+                        graph.ainvoke(
+                            {
+                                "game": game,
+                                "message": message,
+                                "ui_state": ui_state,
+                                "scope_override": scope_override,
+                            },
+                            config={"recursion_limit": 25},
+                        ),
+                        timeout=self.settings.agent_deadline_s,
+                    )
                     trace = final.get("trace", [])
                     model_calls = final.get("model_calls", [])
                     validated = final.get("validated")
@@ -218,34 +296,107 @@ class AgentRunner:
                 except Exception as exc:  # noqa: BLE001 - any model/runtime failure falls back, never corrupts state
                     fallback_reason = f"Local model error ({exc.__class__.__name__}). Check the Ollama service and model configuration."
             if validated is not None:
-                provenance = {"source": "ai", "model": model_label(probe), "modelTag": self.settings.ollama_model,
-                              "indicator": indicator["indicator"]}
+                provenance = {
+                    "source": "ai",
+                    "model": model_label(probe),
+                    "modelTag": self.settings.ollama_model,
+                    "indicator": indicator["indicator"],
+                }
             else:
-                handle.step("Using the offline rule-based fallback (not AI-generated)")
-                draft = fallback_draft(self.store, self.profile, game, message, ui_state)
-                validated = validate_draft(self.store, game, draft, source="fallback")
-                provenance = {"source": "fallback", "model": None, "fallbackReason": fallback_reason,
-                              "indicator": indicator["indicator"]}
+                handle.step("Using basic offline suggestions (not AI-generated)")
+                draft, scope_plan, audit = fallback_turn(
+                    self.store,
+                    self.profile,
+                    game,
+                    message,
+                    ui_state,
+                    scope_override=scope_override,
+                )
+                validated = validate_draft(
+                    self.store,
+                    game,
+                    draft,
+                    source="fallback",
+                    max_recommendations=scope_plan.max_recs,
+                    scope_plan=scope_plan,
+                )
+                validated["plan"] = {
+                    **scope_plan.to_meta(),
+                    "autoStage": scope_plan.auto_stage,
+                    "partialCoverage": False,
+                    "batchesCompleted": 1,
+                    "batchesTotal": 1,
+                    "coverage": {
+                        "evaluatedCount": audit["evaluatedCount"],
+                        "eligibleCount": audit["eligibleCount"],
+                        "proposedCount": len(validated["recommendations"]),
+                        "alreadyAlignedCount": audit["alreadyAlignedCount"],
+                        "alreadyStagedCount": audit["alreadyStagedCount"],
+                        "lockedCount": audit["lockedCount"],
+                        "unavailableCount": audit["unavailableCount"],
+                        "manualCount": audit["manualCount"],
+                        "byCategory": audit["byCategory"],
+                    },
+                    "manualConsiderations": audit["manualConsiderations"][:10],
+                }
+                provenance = {
+                    "source": "fallback",
+                    "model": None,
+                    "fallbackReason": fallback_reason,
+                    "indicator": indicator["indicator"],
+                }
                 status = "fallback"
             handle.step("Done")
         except asyncio.CancelledError:
             handle.status = "cancelled"
-            self._finish(handle, status="cancelled", result=None, provenance=None, trace=trace, model_calls=model_calls,
-                         error="Cancelled by user")
+            self._finish(
+                handle,
+                status="cancelled",
+                result=None,
+                provenance=None,
+                trace=trace,
+                model_calls=model_calls,
+                error="Cancelled by user",
+            )
             raise
         except Exception as exc:  # noqa: BLE001
             handle.status = "failed"
-            self._finish(handle, status="failed", result=None, provenance=None, trace=trace, model_calls=model_calls,
-                         error=f"{exc.__class__.__name__}: {str(exc)[:200]}")
+            self._finish(
+                handle,
+                status="failed",
+                result=None,
+                provenance=None,
+                trace=trace,
+                model_calls=model_calls,
+                error=f"{exc.__class__.__name__}: {str(exc)[:200]}",
+            )
             return
         handle.status = status
-        self._finish(handle, status=status, result=validated, provenance=provenance, trace=trace,
-                     model_calls=model_calls, error=fallback_reason, message=message)
+        self._finish(
+            handle,
+            status=status,
+            result=validated,
+            provenance=provenance,
+            trace=trace,
+            model_calls=model_calls,
+            error=fallback_reason,
+            message=message,
+        )
 
-    def _finish(self, handle: RunHandle, *, status: str, result: Optional[dict[str, Any]], provenance: Optional[dict[str, Any]],
-                trace: list[dict[str, Any]], model_calls: list[dict[str, Any]], error: Optional[str],
-                message: Optional[str] = None) -> None:
+    def _finish(
+        self,
+        handle: RunHandle,
+        *,
+        status: str,
+        result: Optional[dict[str, Any]],
+        provenance: Optional[dict[str, Any]],
+        trace: list[dict[str, Any]],
+        model_calls: list[dict[str, Any]],
+        error: Optional[str],
+        message: Optional[str] = None,
+    ) -> None:
         latency = round((time.perf_counter() - handle.started) * 1000)
+        proposal_ids: list[str] = []
         conn = self.store.connect()
         try:
             with write_tx(conn):
@@ -255,21 +406,97 @@ class AgentRunner:
                     if result.get("intent") == "recommend" and result.get("goalDimensions") and message:
                         goal_id = self.profile.set_session_goal(conn, handle.game, message[:160], result["goalDimensions"], "chat")
                         result["sessionGoalId"] = goal_id
+
+                    plan_meta = result.get("plan") or {}
+                    recs = result.get("recommendations") or []
+                    should_auto_stage = (
+                        status in ("succeeded", "fallback")
+                        and result.get("intent") == "recommend"
+                        and len(recs) > 0
+                        and bool(plan_meta.get("autoStage", True))
+                    )
+                    if should_auto_stage:
+                        staged_items = [
+                            {
+                                "settingId": r["settingId"],
+                                "proposedValue": r["proposedValue"],
+                                "why": r.get("whyForGoal"),
+                                "tradeoff": r.get("tradeoff"),
+                                "confidence": r.get("confidence"),
+                                "dimensions": [r["dimension"]] if r.get("dimension") else result.get("goalDimensions", []),
+                                "basedOn": r.get("basedOn"),
+                            }
+                            for r in recs
+                        ]
+                        scope_name = plan_meta.get("scope")
+                        title = (
+                            f"Comprehensive setup ({len(staged_items)} changes)"
+                            if scope_name in ("full_game_setup", "broad_optimization") and len(staged_items) > 3
+                            else f"Suggested changes ({len(staged_items)})"
+                        )
+                        staged = self.proposals.auto_stage_for_run(
+                            conn,
+                            handle.game,
+                            source=(provenance or {}).get("source", "fallback"),
+                            run_id=handle.run_id,
+                            title=title,
+                            items=staged_items,
+                            plan=plan_meta,
+                        )
+                        result["stagedProposalId"] = staged["proposalId"]
+                        result["stagedCount"] = staged["stagedCount"]
+                        result["alreadyPendingCount"] = staged["alreadyPendingCount"]
+                        if staged["proposalId"]:
+                            proposal_ids = [staged["proposalId"]]
+
                     if self.settings.store_chat_history:
-                        conn.execute("INSERT INTO chat_messages(id, game, session_id, role, content_json, run_id, created_at) VALUES (?,?,?,?,?,?,?)",
-                                     (new_id("msg"), handle.game, sess.get("sessionId"), "assistant",
-                                      dumps({"response": result}), handle.run_id, now_iso()))
+                        conn.execute(
+                            "INSERT INTO chat_messages(id, game, session_id, role, content_json, run_id, created_at) VALUES (?,?,?,?,?,?,?)",
+                            (
+                                new_id("msg"),
+                                handle.game,
+                                sess.get("sessionId"),
+                                "assistant",
+                                dumps({"response": result}),
+                                handle.run_id,
+                                now_iso(),
+                            ),
+                        )
                 elif status == "cancelled" and self.settings.store_chat_history:
-                    conn.execute("INSERT INTO chat_messages(id, game, session_id, role, content_json, run_id, created_at) VALUES (?,?,?,?,?,?,?)",
-                                 (new_id("msg"), handle.game, sess.get("sessionId"), "system",
-                                  dumps({"text": "Request cancelled. Nothing was changed."}), handle.run_id, now_iso()))
-                validation = {"filtered": (result or {}).get("filtered", []), "notes": (result or {}).get("validationNotes", []),
-                              "modelCalls": model_calls}
+                    conn.execute(
+                        "INSERT INTO chat_messages(id, game, session_id, role, content_json, run_id, created_at) VALUES (?,?,?,?,?,?,?)",
+                        (
+                            new_id("msg"),
+                            handle.game,
+                            sess.get("sessionId"),
+                            "system",
+                            dumps({"text": "Request cancelled. Nothing was changed."}),
+                            handle.run_id,
+                            now_iso(),
+                        ),
+                    )
+                validation = {
+                    "filtered": (result or {}).get("filtered", []),
+                    "notes": (result or {}).get("validationNotes", []),
+                    "modelCalls": model_calls,
+                }
                 conn.execute(
                     "UPDATE agent_runs SET status = ?, steps_json = ?, tool_calls_json = ?, validation_json = ?, result_json = ?, "
-                    "error = ?, latency_ms = ?, finished_at = ?, mode = ? WHERE id = ?",
-                    (status, dumps(handle.steps), dumps(trace), dumps(validation), dumps(result) if result is not None else None,
-                     error, latency, now_iso(), (provenance or {}).get("source", "none") if provenance else "none", handle.run_id))
+                    "proposal_ids_json = ?, error = ?, latency_ms = ?, finished_at = ?, mode = ? WHERE id = ?",
+                    (
+                        status,
+                        dumps(handle.steps),
+                        dumps(trace),
+                        dumps(validation),
+                        dumps(result) if result is not None else None,
+                        dumps(proposal_ids),
+                        error,
+                        latency,
+                        now_iso(),
+                        (provenance or {}).get("source", "none") if provenance else "none",
+                        handle.run_id,
+                    ),
+                )
         finally:
             conn.close()
             self._game_run.pop(handle.game, None)

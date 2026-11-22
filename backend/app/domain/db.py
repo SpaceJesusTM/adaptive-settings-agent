@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -197,6 +197,21 @@ MIGRATIONS: dict[int, str] = {
     );
 
     CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value_json TEXT NOT NULL);
+    """,
+    2: """
+    ALTER TABLE proposals ADD COLUMN plan_json TEXT;
+    ALTER TABLE proposals ADD COLUMN auto_staged INTEGER NOT NULL DEFAULT 0;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_proposals_run_autostage
+        ON proposals(run_id) WHERE run_id IS NOT NULL AND auto_staged = 1;
+
+    CREATE TABLE IF NOT EXISTS valorant_crosshair_profiles (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        settings_json TEXT NOT NULL,
+        is_active INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
     """,
 }
 

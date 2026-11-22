@@ -8,6 +8,7 @@ from .agent.runner import AgentRunner, ModelFactory
 from .agent.graph import make_chat_models
 from .catalog.loader import CatalogRegistry, load_registry
 from .config import Settings, get_settings
+from .domain.crosshair import CrosshairProfileService
 from .domain.profile import ProfileService
 from .domain.proposals import ProposalService
 from .domain.recommender import RelevantNowService
@@ -24,6 +25,7 @@ class Services:
     proposals: ProposalService
     relevant_now: RelevantNowService
     runner: AgentRunner
+    crosshair: CrosshairProfileService
 
 
 def build_services(settings: Optional[Settings] = None, *, model_factory: ModelFactory = make_chat_models,
@@ -36,6 +38,7 @@ def build_services(settings: Optional[Settings] = None, *, model_factory: ModelF
     profile = ProfileService(store)
     proposals = ProposalService(store, profile)
     relevant_now = RelevantNowService(store, profile)
-    runner = AgentRunner(store, profile, settings, model_factory=model_factory)
+    runner = AgentRunner(store, profile, settings, model_factory=model_factory, proposals=proposals)
+    crosshair = CrosshairProfileService(store)
     return Services(settings=settings, registry=registry, store=store, profile=profile, proposals=proposals,
-                    relevant_now=relevant_now, runner=runner)
+                    relevant_now=relevant_now, runner=runner, crosshair=crosshair)

@@ -50,6 +50,8 @@ def options_text(s: Setting) -> str:
             return f"number {s.min:g}-{s.max:g} (shown as %), step {s.step:g}"
         unit = f" {s.unit}" if s.unit else ""
         return f"number {s.min:g}-{s.max:g}{unit}, step {s.step:g}"
+    if s.controlType == "color":
+        return "hex color #RRGGBB"
     return "key name"
 
 

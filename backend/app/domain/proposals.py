@@ -17,6 +17,7 @@ from .profile import ProfileService
 from .store import Change, Store
 from .values import ValueError_, availability_problem, display_value, normalize_value, values_equal
 
+MAX_PROPOSAL_ITEMS = 60
 SOURCES = {"ai": "ai_applied", "fallback": "fallback_applied", "rules": "rule_applied"}
 SOURCE_LABELS = {"ai": "Local AI suggestion", "fallback": "Offline fallback (not AI)", "rules": "Rule-based suggestion"}
 
@@ -48,6 +49,7 @@ class ProposalService:
             stale = int(cur["revision"]) != int(r["baseline_revision"])
             items.append({
                 "id": r["id"], "settingId": s.id, "label": s.exactLabel, "path": s.canonicalPath,
+                "category": s.category, "section": s.section, "applyMode": s.applyMode,
                 "tabId": s.tabId, "subtabId": s.subtabId,
                 "controlType": s.controlType, "validOptions": [o.model_dump() for o in (s.validOptions or [])],
                 "min": s.min, "max": s.max, "step": s.step, "display": s.display, "unit": s.unit,
@@ -64,9 +66,13 @@ class ProposalService:
                 "whatItDoesSource": s.descriptionSource, "sourceURL": s.sourceURL,
                 "confidence": r["confidence"], "dimensions": loads(r["dimensions_json"], []), "basedOn": r["based_on"],
             })
+        keys = set(p.keys())
         return {"id": p["id"], "game": game, "source": p["source"], "sourceLabel": SOURCE_LABELS.get(p["source"], p["source"]),
                 "runId": p["run_id"], "title": p["title"], "status": p["status"], "createdAt": p["created_at"],
-                "updatedAt": p["updated_at"], "appliedBatchId": p["applied_batch_id"], "items": items}
+                "updatedAt": p["updated_at"], "appliedBatchId": p["applied_batch_id"],
+                "autoStaged": bool(p["auto_staged"]) if "auto_staged" in keys else False,
+                "plan": loads(p["plan_json"], None) if "plan_json" in keys else None,
+                "items": items}
 
     def list(self, game: str, status: Optional[str] = None) -> list[dict[str, Any]]:
         self.store.require_game(game)
@@ -90,65 +96,144 @@ class ProposalService:
             conn.close()
 
     # ------------------------------------------------------------------ staging
-    def create(self, game: str, *, source: str, run_id: Optional[str], title: Optional[str],
-               items: list[dict[str, Any]]) -> dict[str, Any]:
+    def _insert_proposal_tx(
+        self,
+        conn: sqlite3.Connection,
+        game: str,
+        *,
+        source: str,
+        run_id: Optional[str],
+        title: Optional[str],
+        items: list[dict[str, Any]],
+        auto_staged: bool = False,
+        plan: Optional[dict[str, Any]] = None,
+    ) -> str:
+        """Validate items, capture server-side baselines and insert proposal rows inside an active write_tx."""
         if source not in SOURCES:
             raise Invalid("source must be ai, fallback or rules")
         if not items:
             raise Invalid("A proposal needs at least one item")
-        if len(items) > 8:
-            raise Invalid("At most 8 changes can be staged in one proposal")
+        if len(items) > MAX_PROPOSAL_ITEMS:
+            raise Invalid(f"At most {MAX_PROPOSAL_ITEMS} changes can be staged in one proposal")
+        self.store.require_game(game)
+        values = self.store.values(conn, game)
+        flat = {k: v["value"] for k, v in values.items()}
+        hw = self.store.hardware(conn)
+        pid = new_id("prop")
+        ts = now_iso()
+        sess = self.store.session(conn)
+        staged_rows = []
+        seen: set[str] = set()
+        for pos, it in enumerate(items):
+            s = self.store.require_setting(game, str(it.get("settingId", "")))
+            if s.id in seen:
+                raise Invalid(f"{s.exactLabel} appears twice in the proposal")
+            seen.add(s.id)
+            if not s.aiProposable or s.controlType in ("keybind", "preset", "color"):
+                raise Invalid(f"{s.exactLabel} cannot be changed through suggestions", code="not_proposable")
+            try:
+                value = normalize_value(s, it.get("proposedValue"), strict=True)
+            except ValueError_ as exc:
+                raise Invalid(str(exc), code="invalid_value", details={"settingId": s.id}) from exc
+            cur = values.get(s.id, {"value": None, "revision": 0})
+            status, reason = "pending", None
+            if self.store.is_locked(conn, game, s.id):
+                status, reason = "blocked", f"{s.exactLabel} is locked from AI changes."
+            elif values_equal(cur["value"], value):
+                status, reason = "blocked", f"{s.exactLabel} is already {display_value(s, value)}."
+            else:
+                problem = availability_problem(self.store.registry, s, {**flat, s.id: value}, hw)
+                if problem:
+                    status, reason = "blocked", problem
+            dims = [d for d in (it.get("dimensions") or []) if d in DIMENSION_LABELS]
+            staged_rows.append((new_id("item"), pid, pos, s.id, dumps(cur["value"]), int(cur["revision"]),
+                                dumps(value), None, status, reason, (it.get("why") or "")[:700],
+                                (it.get("tradeoff") or None), it.get("confidence"), dumps(dims),
+                                (it.get("basedOn") or None)))
+        any_pending = any(r[8] == "pending" for r in staged_rows)
+        conn.execute(
+            "INSERT INTO proposals(id, game, source, run_id, title, status, condition, session_id, created_at, updated_at, plan_json, auto_staged) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (pid, game, source, run_id, (title or "Suggested changes")[:120], "pending" if any_pending else "closed",
+             sess.get("condition"), sess.get("sessionId"), ts, ts, dumps(plan) if plan is not None else None,
+             1 if auto_staged else 0),
+        )
+        conn.executemany(
+            "INSERT INTO proposal_items(id, proposal_id, position, setting_id, baseline_value_json, baseline_revision, "
+            "proposed_value_json, edited_value_json, status, status_reason, why, tradeoff, confidence, dimensions_json, based_on) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", staged_rows
+        )
+        return pid
+
+    def create(self, game: str, *, source: str, run_id: Optional[str], title: Optional[str],
+               items: list[dict[str, Any]], plan: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         self.store.require_game(game)
         conn = self.store.connect()
         try:
             with write_tx(conn):
-                values = self.store.values(conn, game)
-                flat = {k: v["value"] for k, v in values.items()}
-                hw = self.store.hardware(conn)
-                pid = new_id("prop")
-                ts = now_iso()
-                sess = self.store.session(conn)
-                staged_rows = []
-                seen: set[str] = set()
-                for pos, it in enumerate(items):
-                    s = self.store.require_setting(game, str(it.get("settingId", "")))
-                    if s.id in seen:
-                        raise Invalid(f"{s.exactLabel} appears twice in the proposal")
-                    seen.add(s.id)
-                    if not s.aiProposable or s.controlType in ("keybind", "preset"):
-                        raise Invalid(f"{s.exactLabel} cannot be changed through suggestions", code="not_proposable")
-                    try:
-                        value = normalize_value(s, it.get("proposedValue"), strict=True)
-                    except ValueError_ as exc:
-                        raise Invalid(str(exc), code="invalid_value", details={"settingId": s.id}) from exc
-                    cur = values.get(s.id, {"value": None, "revision": 0})
-                    status, reason = "pending", None
-                    if self.store.is_locked(conn, game, s.id):
-                        status, reason = "blocked", f"{s.exactLabel} is locked from AI changes."
-                    elif values_equal(cur["value"], value):
-                        status, reason = "blocked", f"{s.exactLabel} is already {display_value(s, value)}."
-                    else:
-                        problem = availability_problem(self.store.registry, s, {**flat, s.id: value}, hw)
-                        if problem:
-                            status, reason = "blocked", problem
-                    dims = [d for d in (it.get("dimensions") or []) if d in DIMENSION_LABELS]
-                    staged_rows.append((new_id("item"), pid, pos, s.id, dumps(cur["value"]), int(cur["revision"]),
-                                        dumps(value), None, status, reason, (it.get("why") or "")[:700],
-                                        (it.get("tradeoff") or None), it.get("confidence"), dumps(dims),
-                                        (it.get("basedOn") or None)))
-                any_pending = any(r[8] == "pending" for r in staged_rows)
-                conn.execute(
-                    "INSERT INTO proposals(id, game, source, run_id, title, status, condition, session_id, created_at, updated_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    (pid, game, source, run_id, (title or "Suggested changes")[:120], "pending" if any_pending else "closed",
-                     sess.get("condition"), sess.get("sessionId"), ts, ts))
-                conn.executemany(
-                    "INSERT INTO proposal_items(id, proposal_id, position, setting_id, baseline_value_json, baseline_revision, "
-                    "proposed_value_json, edited_value_json, status, status_reason, why, tradeoff, confidence, dimensions_json, based_on) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", staged_rows)
+                pid = self._insert_proposal_tx(conn, game, source=source, run_id=run_id, title=title, items=items,
+                                               auto_staged=False, plan=plan)
             return self.view(conn, pid)
         finally:
             conn.close()
+
+    def auto_stage_for_run(
+        self,
+        conn: sqlite3.Connection,
+        game: str,
+        *,
+        source: str,
+        run_id: str,
+        title: Optional[str],
+        items: list[dict[str, Any]],
+        plan: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Idempotently auto-stage one draft proposal for a completed chat run inside an active write_tx.
+
+        Never mutates setting values and never duplicates or overwrites existing pending items.
+        """
+        existing = conn.execute(
+            "SELECT id FROM proposals WHERE run_id = ? AND auto_staged = 1", (run_id,)
+        ).fetchone()
+        if existing is not None:
+            cnt = conn.execute(
+                "SELECT COUNT(*) AS n FROM proposal_items WHERE proposal_id = ? AND status = 'pending'",
+                (existing["id"],),
+            ).fetchone()["n"]
+            return {"proposalId": existing["id"], "stagedCount": int(cnt), "alreadyPendingCount": 0, "idempotentReplay": True}
+
+        pending_ids = {
+            r["setting_id"]
+            for r in conn.execute(
+                "SELECT i.setting_id FROM proposal_items i JOIN proposals p ON p.id = i.proposal_id "
+                "WHERE p.game = ? AND p.status = 'pending' AND i.status = 'pending'",
+                (game,),
+            )
+        }
+        filtered_items = [it for it in items if str(it.get("settingId", "")) not in pending_ids]
+        already_pending_count = len(items) - len(filtered_items)
+        if not filtered_items:
+            return {"proposalId": None, "stagedCount": 0, "alreadyPendingCount": already_pending_count, "idempotentReplay": False}
+
+        pid = self._insert_proposal_tx(
+            conn,
+            game,
+            source=source,
+            run_id=run_id,
+            title=title,
+            items=filtered_items[:MAX_PROPOSAL_ITEMS],
+            auto_staged=True,
+            plan=plan,
+        )
+        cnt = conn.execute(
+            "SELECT COUNT(*) AS n FROM proposal_items WHERE proposal_id = ? AND status = 'pending'", (pid,)
+        ).fetchone()["n"]
+        return {
+            "proposalId": pid,
+            "stagedCount": int(cnt),
+            "alreadyPendingCount": already_pending_count,
+            "idempotentReplay": False,
+        }
 
     def _pending_item(self, conn: sqlite3.Connection, proposal_id: str, item_id: str) -> sqlite3.Row:
         p = conn.execute("SELECT * FROM proposals WHERE id = ?", (proposal_id,)).fetchone()
@@ -226,7 +311,7 @@ class ProposalService:
                                                    label=p["title"], enforce_locks=True, strict=True,
                                                    proposal_id=proposal_id, client_request_id=idempotency_key)
                     ts = now_iso()
-                    for r in selected:
+                    for idx, r in enumerate(selected):
                         conn.execute("UPDATE proposal_items SET status = 'applied', status_reason = NULL WHERE id = ?", (r["id"],))
                         s = self.store.registry.setting(p["game"], r["setting_id"])
                         dims = loads(r["dimensions_json"], []) or [None]
@@ -235,7 +320,7 @@ class ProposalService:
                                                       proposal_id=proposal_id,
                                                       detail=f"Applied {s.exactLabel if s else r['setting_id']}: "
                                                              f"{display_value(s, loads(r['baseline_value_json'])) if s else ''} -> "
-                                                             f"{display_value(s, changes[selected.index(r)].value) if s else ''}")
+                                                             f"{display_value(s, changes[idx].value) if s else ''}")
                     remaining = conn.execute("SELECT COUNT(*) AS n FROM proposal_items WHERE proposal_id = ? AND status = 'pending'",
                                              (proposal_id,)).fetchone()["n"]
                     conn.execute("UPDATE proposals SET status = ?, applied_batch_id = ?, updated_at = ? WHERE id = ?",

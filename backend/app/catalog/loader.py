@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
@@ -57,6 +58,9 @@ def _resolve_options(raw: RawSetting, option_sets: dict[str, list[Option]], wher
     return list(raw.options)
 
 
+_COLOR_HEX_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
 def value_in_domain(setting: Setting, value: Any) -> bool:
     """True when `value` is a legal stored value for `setting` (no label resolution, no snapping)."""
     if setting.controlType in ("dropdown", "segmented", "preset"):
@@ -67,6 +71,8 @@ def value_in_domain(setting: Setting, value: Any) -> bool:
         return setting.min is not None and setting.max is not None and setting.min - 1e-9 <= float(value) <= setting.max + 1e-9
     if setting.controlType == "keybind":
         return isinstance(value, str) and len(value) <= 40
+    if setting.controlType == "color":
+        return isinstance(value, str) and bool(_COLOR_HEX_RE.match(value))
     return False
 
 
@@ -133,7 +139,7 @@ def build_catalog(raw: RawCatalog) -> Catalog:
                         goalTags=tags,
                         goalHints=rs.hints,
                         aiProposable=raw.defaults.aiProposable if rs.aiProposable is None else rs.aiProposable,
-                        applyMode=tab.applyMode,
+                        applyMode=rs.applyMode or tab.applyMode,
                         sourceRefs=src_refs,
                         sourceURL=primary.url,
                         sourceDate=primary.date,
@@ -194,6 +200,11 @@ def validate_catalog(catalog: Catalog) -> None:
                 raise CatalogError(f"{where}: slider must not declare options")
         elif s.controlType == "keybind" and s.aiProposable:
             raise CatalogError(f"{where}: keybinds are never AI-proposable")
+        elif s.controlType == "color":
+            if s.validOptions or s.min is not None or s.max is not None:
+                raise CatalogError(f"{where}: color controls must not declare options or min/max")
+            if s.aiProposable:
+                raise CatalogError(f"{where}: personal color pickers must not be AI-proposable")
 
         if s.controlType == "preset":
             if s.preset is None or s.aiProposable:

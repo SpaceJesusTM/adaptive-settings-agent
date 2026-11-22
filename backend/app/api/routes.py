@@ -54,7 +54,7 @@ class BatchItem(BaseModel):
 
 
 class BatchIn(BaseModel):
-    changes: list[BatchItem] = Field(min_length=1, max_length=40)
+    changes: list[BatchItem] = Field(min_length=1, max_length=60)
     clientRequestId: Optional[str] = Field(default=None, max_length=80)
     label: Optional[str] = Field(default=None, max_length=120)
 
@@ -82,7 +82,8 @@ class ProposalIn(BaseModel):
     source: Literal["ai", "fallback", "rules"]
     runId: Optional[str] = None
     title: Optional[str] = Field(default=None, max_length=120)
-    items: list[ProposalItemIn] = Field(min_length=1, max_length=8)
+    plan: Optional[dict[str, Any]] = None
+    items: list[ProposalItemIn] = Field(min_length=1, max_length=60)
 
 
 class ItemEditIn(BaseModel):
@@ -90,7 +91,7 @@ class ItemEditIn(BaseModel):
 
 
 class ApplyIn(BaseModel):
-    itemIds: list[str] = Field(min_length=1, max_length=8)
+    itemIds: list[str] = Field(min_length=1, max_length=60)
     idempotencyKey: Optional[str] = Field(default=None, max_length=80)
 
 
@@ -103,6 +104,7 @@ class ChatIn(BaseModel):
     game: Literal["valorant", "cs2"]
     message: str = Field(min_length=1, max_length=1000)
     uiState: dict[str, Any] = Field(default_factory=dict)
+    scopeOverride: Optional[Literal["auto", "focused", "comprehensive"]] = None
 
 
 class ContextEventIn(BaseModel):
@@ -128,6 +130,20 @@ class PreferenceIn(BaseModel):
 class ResetIn(BaseModel):
     scenario: str = "default"
     mode: Literal["full", "ai_only"] = "full"
+
+
+class CrosshairCreateIn(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+    copyFromCurrent: bool = True
+
+
+class CrosshairRenameIn(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+
+
+class CrosshairImportIn(BaseModel):
+    code: str = Field(min_length=3, max_length=600)
+    name: Optional[str] = Field(default=None, max_length=40)
 
 
 # ----------------------------------------------------------------------------------- meta
@@ -265,6 +281,43 @@ def lock(game: str, setting_id: str, body: FlagIn, request: Request) -> dict[str
     return {"locks": s.store.set_flag("locks", game, setting_id, body.on)}
 
 
+# ----------------------------------------------------------------------------------- VALORANT crosshair profiles
+
+@router.get("/valorant/crosshair/profiles")
+def list_crosshair_profiles(request: Request) -> list[dict[str, Any]]:
+    return svc(request).crosshair.list()
+
+
+@router.post("/valorant/crosshair/profiles")
+def create_crosshair_profile(body: CrosshairCreateIn, request: Request) -> dict[str, Any]:
+    return svc(request).crosshair.create(body.name, copy_from_current=body.copyFromCurrent)
+
+
+@router.post("/valorant/crosshair/profiles/import")
+def import_crosshair_profile(body: CrosshairImportIn, request: Request) -> dict[str, Any]:
+    return svc(request).crosshair.import_code(body.code, body.name)
+
+
+@router.post("/valorant/crosshair/profiles/{profile_id}/select")
+def select_crosshair_profile(profile_id: str, request: Request) -> dict[str, Any]:
+    return svc(request).crosshair.select(profile_id)
+
+
+@router.patch("/valorant/crosshair/profiles/{profile_id}")
+def rename_crosshair_profile(profile_id: str, body: CrosshairRenameIn, request: Request) -> dict[str, Any]:
+    return svc(request).crosshair.rename(profile_id, body.name)
+
+
+@router.delete("/valorant/crosshair/profiles/{profile_id}")
+def delete_crosshair_profile(profile_id: str, request: Request) -> dict[str, Any]:
+    return svc(request).crosshair.delete(profile_id)
+
+
+@router.get("/valorant/crosshair/profiles/{profile_id}/export")
+def export_crosshair_profile(profile_id: str, request: Request) -> dict[str, Any]:
+    return svc(request).crosshair.export_code(profile_id)
+
+
 # ----------------------------------------------------------------------------------- proposals
 
 @router.get("/games/{game}/proposals")
@@ -276,8 +329,14 @@ def list_proposals(game: str, request: Request, status: Optional[str] = None) ->
 def create_proposal(body: ProposalIn, request: Request) -> dict[str, Any]:
     s = svc(request)
     require_adaptive(s)
-    return s.proposals.create(body.game, source=body.source, run_id=body.runId, title=body.title,
-                              items=[i.model_dump() for i in body.items])
+    return s.proposals.create(
+        body.game,
+        source=body.source,
+        run_id=body.runId,
+        title=body.title,
+        items=[i.model_dump() for i in body.items],
+        plan=body.plan,
+    )
 
 
 @router.get("/proposals/{proposal_id}")
@@ -315,7 +374,12 @@ def reject_proposal(proposal_id: str, body: RejectIn, request: Request) -> dict[
 
 @router.post("/chat", status_code=202)
 async def chat(body: ChatIn, request: Request) -> dict[str, Any]:
-    return await svc(request).runner.start(body.game, body.message, body.uiState)
+    return await svc(request).runner.start(
+        body.game,
+        body.message,
+        body.uiState,
+        scope_override=body.scopeOverride,
+    )
 
 
 @router.get("/chat/runs/{run_id}")

@@ -36,7 +36,7 @@ DIMENSION_LABELS: dict[str, str] = {
     "network_stability": "stable network play",
 }
 
-ControlType = Literal["segmented", "dropdown", "slider", "keybind", "preset"]
+ControlType = Literal["segmented", "dropdown", "slider", "keybind", "preset", "color"]
 VerificationStatus = Literal[
     "verified-game-files",
     "verified-official-doc",
@@ -117,6 +117,7 @@ class RawSetting(_Strict):
     unit: Optional[str] = None
     display: Optional[Literal["percent"]] = None
     rangeVerified: bool = True
+    applyMode: Optional[Literal["immediate", "explicit"]] = None
     qualifier: Optional[str] = None
     preset: Optional[PresetSpec] = None
     default: DefaultInfo
