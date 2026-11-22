@@ -1,9 +1,7 @@
 # Implementation notes for the paper (verified facts only)
 
 *Adapting Without Rearranging: Conversational Guidance for Complex Settings* — CSC2524, University of Toronto.
-Everything below was implemented and verified across the original Windows prototype (2026-11-21) and the macOS
-comprehensive UX & settings pass (2026-11-22). **No human-participant study has been conducted**; no participant
-data exists. Numbers come from automated suites and logged local `gemma4:12b-it-q4_K_M` runs.
+Everything below was implemented and verified across the initial Windows prototype (2026-11-21) and the macOS comprehensive UX, settings, and optimization pass on branch `feat/comprehensive-ux-settings-pass` (2026-11-22). **No human-participant study has been conducted**; no participant data exists. Reported numbers come from automated test suites and logged local `gemma4:12b-it-q4_K_M` runs.
 
 ## System overview
 
@@ -18,7 +16,7 @@ flowchart LR
     S["Store: values, revisions,<br/>history/undo (single write path)"]
     P["Proposal engine<br/>(idempotent auto-stage → revalidate → apply)"]
     R["Profile + deterministic recommender<br/>(goals, durable prefs, hold rule)"]
-    G["LangGraph turn: scope + planner → read-only tools<br/>→ batched JSON-schema compose → validator → fallback"]
+    G["LangGraph turn: scope + planner → grounded fast-path /<br/>read-only tools → batched JSON-schema compose → validator → fallback"]
   end
   O[("Ollama<br/>gemma4:12b-it-q4_K_M")]
   M -- "manual change" --> S
@@ -31,72 +29,51 @@ flowchart LR
   R --> A
 ```
 
-* **Testbed:** two simulated PC settings menus (**315 settings total** in catalogue `2026.11.22-1`). VALORANT: **177 settings** (24 `verified-official-doc`, 32 `verified-official-screenshot`, 28 `partially-verified`, 93 `secondary-only`, plus 15-profile Crosshair editor with reactive SVG preview & Riot `0;P;...` code import/export); CS2: **138 settings** extracted from the CS2 client files of build `2000948` (`SteamDatabase/GameTracking-CS2 @ 694f81f`, incl. HUD Edge Positions `safezonex`/`safezoney` preview with immediate *Done* save and simulated *New* tab). Both menus share one typed settings engine and differ in layout and styling.
-* **Conditions:** A = static baseline (full menu, manual change, prototype search, history/undo). B = the same menu plus Participant-mode Adaptive UX (`Changes` / `Pinned` / `Discover` Adaptive Workspace, detachable `/?view=workspace`, simplified chat w/ auto-staged proposals, pins/locks, and Experimenter drawer hidden behind an explicit toggle). Automated tests assert identical rows and order in A and B and zero AI affordances in A.
+* **Testbed:** two simulated PC settings menus (**315 settings total** in catalogue `2026.11.22-1`).
+  * **VALORANT (177 settings, 59 AI-proposable):** `24` `verified-official-doc`, `32` `verified-official-screenshot`, `28` `partially-verified`, `93` `secondary-only`; `157` `verified` / `19` `inferred` / `1` `partial` menu paths; `43` sliders marked `rangeVerified: false`. Includes a simulated **15-profile Crosshair editor** (`General`, `Primary`, `Aim Down Sights`, `Sniper Scope`), reactive SVG preview, custom `#RRGGBB` color domain, and validated Riot `0;P;...` share-code import/export (`backend/app/domain/crosshair.py`), plus simulated *Video > Stats*, *Audio > Voice-Over*, and *Controls > Actions / Equipment / Communication*.
+  * **Counter-Strike 2 (138 settings, 93 AI-proposable):** all `138` entries `verified-game-files` (`0` inferred paths, `0` unverified slider ranges) extracted from CS2 client files of build `2000948` (`SteamDatabase/GameTracking-CS2 @ 694f81f`), including explicit-apply *Advanced Video* presets, **HUD Edge Positions** (`safezonex`/`safezoney`) with Valve's `(1-Y)*50% / (1-X)*50%` safezone preview and immediate *Done* commit (`HudEdgeX` fixed `0.50` prototype floor), and a curated simulated *New* tab.
+* **Conditions:** **A (Baseline)** provides static canonical navigation, prototype search, manual edits, Crosshair/HUD Edge editors, and undo history. **B (Adaptive)** keeps the identical canonical rows and manual behavior while adding Participant-mode chat (auto-staged changes), `Changes` / `Pinned` / `Discover` Adaptive Workspace, AI locks, detachable `/?view=workspace` sync, and hidden **Experimenter** diagnostics. Automated tests assert strict A/B DOM row parity and zero AI affordances in A.
 
 ## Comprehensive Pass Extensions & Literature Grounding (2026-11-22)
 
-See [NEXT_PASS_DESIGN_AUDIT.md](NEXT_PASS_DESIGN_AUDIT.md), [RESEARCH_RATIONALE.md](RESEARCH_RATIONALE.md), and [PARTICIPANT_PILOT.md](PARTICIPANT_PILOT.md) for the detailed pass record:
+See [NEXT_PASS_DESIGN_AUDIT.md](NEXT_PASS_DESIGN_AUDIT.md), [RESEARCH_RATIONALE.md](RESEARCH_RATIONALE.md), [REQUIREMENTS_MATRIX.md](REQUIREMENTS_MATRIX.md), and [PARTICIPANT_PILOT.md](PARTICIPANT_PILOT.md):
 
-1. **Literature Synthesis (7 verified HCI papers):** Findlater & McGrenere (CHI 2004, IJHCS 2010), Bunt et al. (IUI 2007), Todi et al. (CHI 2021), Kim et al. (IUI 2026), Alves et al. (CHI 2026), and **Ingesson & Riveiro (DIS 2026)** (*When Do Users (Not) Want Explanations?* — corrected verified second author spelling; note that explanation demand is selective/goal-driven and passive explanations alone do not guarantee comprehension or calibration).
-2. **Intent-Adaptive Scope & Idempotent Auto-Staging:** `backend/app/agent/scope.py` and `backend/app/domain/planner.py` adapt candidate scope (`explain_only`, `single_setting`, `focused_goal`, `broad_setup`, `full_setup`) and perform per-category batching (`MAX_PROPOSAL_ITEMS=60`), while `proposals.auto_stage_for_run` stages validated plans idempotently (`idx_proposals_run_autostage`) without modifying any active value until explicit user Apply.
-3. **Adaptive Workspace, Pinned Direct Edits & Sync:** `AdaptiveWorkspace.tsx` unifies `Changes` (category-grouped diffs), `Pinned` (direct manual `SettingControl` edits honoring user authority over AI locks + CS2 pending Video conflict guard), and `Discover` (held proactive cards), synchronized with `/?view=workspace` over `BroadcastChannel` (`sync.ts`).
-4. **Participant vs. Experimenter Presentation:** `StudyBar.tsx` hides A/B tags, `Study controls`, `Trace`, and raw model IDs behind an explicit `Experimenter` toggle; chat replies collapse `What I checked` details by default.
-5. **Notable Deviations from Initial Spec & Rationale:** Prompt context uses deterministic pre-filtering (`render_plan_context` + candidate-scoped `render_context`) instead of sending the entire 315-setting JSON to local 12B inference on macOS (cutting multi-category prompt overhead while preserving read-only tool calls and server-side validation); CS2 `HudEdgeX` uses a `0.50` documented floor approximating `OptionsMenuAPI.GetHudSafeZoneXMin()`.
+1. **Literature Synthesis (7 verified HCI papers):** Findlater & McGrenere (CHI 2004, IJHCS 2010), Bunt et al. (IUI 2007), Todi et al. (CHI 2021), Kim et al. (IUI 2026), Alves et al. (CHI 2026), and **Ingesson & Riveiro (DIS 2026)** (*When Do Users (Not) Want Explanations?* — note selective, goal-dependent explanation demand and the empirical requirement to evaluate comprehension independently of passive explanation availability).
+2. **Intent-Adaptive Scope & Coverage Planning:** `backend/app/agent/scope.py` classifies requests across five scopes (`explain_only`, `focused`, `category_optimization`, `broad_optimization`, `full_game_setup`), respecting `explain_only` precedence even under explicit UI scope overrides. `backend/app/domain/planner.py` (`build_coverage_audit`) evaluates the entire game catalogue against active goal weights, locks, staged items, availability rules, and minor/secondary confidence suppression before LLM invocation (`MAX_PROPOSAL_ITEMS=60`), yielding zero forced changes on already-aligned states (`well_configured_competitive`).
+3. **Auto-Staging Without Auto-Application:** Whenever an assistant turn produces valid recommendations outside `explain_only`, `runner.py` -> `proposals.auto_stage_for_run` stages one proposal idempotently inside the database write transaction (enforced by unique partial index `idx_proposals_run_autostage`). Zero active setting values change prior to explicit user **Apply selected changes**.
+4. **Adaptive Workspace & Detachable View:** `AdaptiveWorkspace.tsx` unifies `Changes` (category-grouped diffs with inline editing and trade-offs), `Pinned` (direct manual `SettingControl` edits honoring user authority over AI locks + CS2 unapplied Video draft guard), and `Discover` (held proactive/cross-game cards staged only on explicit **Prepare for review**), synchronized with standalone `/?view=workspace` via `BroadcastChannel` and `storage` events (`sync.ts`).
+5. **Participant vs. Experimenter Presentation:** `StudyBar.tsx` hides A/B condition pills, `Study controls`, `Trace`, and raw model IDs behind an explicit `Experimenter` toggle; Participant chat surfaces safe progress labels (`participantStepLabel`), a compact `Review N changes` button, and collapsed `What I checked` summaries.
 
-## Automated checks vs. human claims boundary
-
-Track A (technical verification on macOS arm64 + Windows baseline) confirms A/B parity, zero unapproved setting writes, lock/keybind/sensitivity safety boundaries, Riot crosshair & CS2 safezone math, and schema-valid local `gemma4:12b-it-q4_K_M` responses (see [TEST_SUMMARY.md](TEST_SUMMARY.md)). **Track B (human evaluation) has not been executed**; the protocol in [PARTICIPANT_PILOT.md](PARTICIPANT_PILOT.md) measures independent post-task comprehension separately from viewing chat explanations.
-
-## Design goals → mechanisms
+## Design goals → mechanisms (current verified state)
 
 | Goal | Mechanism (implemented) |
 |---|---|
-| **DG1 Stable access** | Canonical catalogue order is never changed; recommendations link to the *existing* row (temporary outline highlight); pins are shortcuts, not copies; search jumps to the canonical location. |
-| **DG2 Understanding** | Every card separates **What it does** (verified catalogue text, source-labelled: Valve tooltip / Riot doc / editorial) from **Why this may help your goal** (model or rule rationale, origin-labelled), plus trade-offs, verification level and a *Why this?* evidence panel. Unverifiable numeric performance claims are removed by the validator. |
-| **DG3 Agency** | Suggestions → explicit **Stage** → editable review tray → **Apply selected changes**; reject/dismiss with feedback; locks (“Locked from AI changes”) enforced at staging and apply; history with source, before/after and proposal id; undo; adaptation can be switched off. |
-| **DG4 Continuity & context** | Session goals (transient, per game) vs durable preferences (explicit, cross-game, with evidence); simulated context events (labelled); cross-game transfer of *abstract* preferences only — CS2 suggestions cite “your saved preference … in VALORANT”; sensitivity and keybinds are never proposable. |
+| **DG1 Stable access** | Canonical catalogue order is invariant across A and B; recommendations link directly to canonical menu rows (`Show in settings` with highlight); `Pinned` provides user-curated shortcuts/manual controls without reordering the menu; search jumps to canonical locations. |
+| **DG2 Understanding** | Every recommendation card and explanation separates **What it does** (catalogue semantics, source-labelled) from **Why this may help your goal** (model or rule rationale, origin-labelled), trade-offs, and collapsed `What I checked` coverage facts. Validator strips URLs and unverifiable numeric performance claims (`%`, `FPS`, `ms`). |
+| **DG3 Agency** | Explicit change requests auto-stage safely into `Workspace → Changes` (never modifying active settings until **Apply selected changes**); Discover suggestions require explicit **Prepare for review**; users can edit values inline, reject with reason, lock settings from AI while retaining manual/Pinned authority, switch off adaptation, and revert batches atomically via **Undo**. |
+| **DG4 Continuity & context** | Transient session goals stay scoped per game/session, while durable preferences are saved only on explicit confirmation (`PreferenceChip` / panel) and transfer **only as abstract dimensions** across games (e.g., citing `"your saved preference … in VALORANT"` in CS2); mouse sensitivity, keybinds, presets, colors, and unverified sliders remain non-AI-proposable. |
 
 ## Authority boundary (the safety property)
 
-* The model has **no write tools**. Read-only tools: `get_current_ui_state`, `list_settings`, `get_setting_details`,
-  `search_settings`, `get_user_preferences`, `get_change_history`.
-* Its structured answer is validated against the selected game's allowlist, proposability, locks, value domain (exact
-  options / on-grid numbers), availability on the simulated PC, no-ops and duplicates; IDs or labels from the other game
-  are rejected. Baselines are captured server-side when the user stages.
-* Apply is all-or-nothing in one SQLite `BEGIN IMMEDIATE` transaction with per-setting revision checks and idempotency
-  keys; conflicts return 409 with per-item reasons. Tests: 4 simultaneous applies → exactly 1 succeeds; a bundle with
-  one item locked after staging applies nothing; a prompt-injection request changes nothing.
+* The model has **no write tools**. Available read-only tools are `get_current_ui_state`, `list_settings`, `get_setting_details`, `search_settings`, `get_user_preferences`, and `get_change_history`.
+* Structured model output (`AssistantDraft` / `BatchDraft`) is validated server-side (`validate_draft`) against the selected game's allowlist, `aiProposable` flag, locks, strict option/numeric domain bounds, hardware/dependency availability, no-ops, already-staged exclusions, and duplicates; foreign-game IDs and labels are rejected.
+* Apply executes atomically in a SQLite `BEGIN IMMEDIATE` transaction with per-setting revision checks and idempotency keys (`Conflict 409` on stale revisions or post-stage locks; all-or-nothing rollback on failure). Automated tests verify 4 concurrent apply requests yield at most 1 commit, post-staging locks block the entire bundle cleanly, and prompt-injection attempts alter zero settings.
 
-## Measured results (automated; not user outcomes)
+## Measured local-model & test performance (automated; not user outcomes)
 
-* Tests: backend **62/62**, frontend unit **10/10**, Playwright end-to-end **12/12** (5 consecutive runs), smoke
-  check 9/9.
-* Real local model (`gemma4:12b-it-q4_K_M`, RTX 4080 SUPER 16 GB, think off), 10 goal cases / 13 turns: 12 turns
-  answered by the model with the intended intent (recommend / explain / preference / navigate / clarify), 1 deliberate
-  model-failure turn answered by the labelled fallback; latency **3.1–8.0 s (median 5.0 s)** per turn after warm-up
-  (cold load ≈ 20 s); 12/12 schema-valid answers; the assistant changed **0** values and auto-created **0** proposals.
-* Reasoning mode on: median 13.2 s and one answer failed to complete valid JSON within 6 000 tokens → kept off.
-* Prompt iteration with the real model was necessary: the first version produced clarifying questions instead of
-  recommendations for clear goals (logged in `docs/evidence/model_runs/`).
+* **Cross-platform verification:** Tested on both the original **Windows 11 + RTX 4080 SUPER** baseline (`62/62` pytest, `10/10` vitest, `12/12` E2E, Windows Gemma 4 median `5.0 s` on narrow single-batch turns before the comprehensive pass) and **macOS `Darwin 27.0.0` `arm64` (Apple M4, 24 GB)** for the comprehensive pass (**102** backend `pytest`, **17** `vitest`, clean `tsc`/`vite` build, **17** Playwright E2E specs, `8/8` real-model `smoke_check.py`). See [TEST_SUMMARY.md](TEST_SUMMARY.md) for full run breakdowns.
+* **Local `gemma4:12b-it-q4_K_M` macOS optimization (`20261122-143214` before vs. `20261122-164946` after):**
+  By adding grounded fast-path routing (`AGENT_FAST_PATH=true` skipping redundant tool-planning calls when deterministic catalogue search/coverage already grounds the turn), fixing the post-tool-limit extra `plan` edge, eliminating full-catalogue JSON duplication (`~867–1,936` compose input tokens instead of `3,507–7,614`), lowering `OLLAMA_NUM_CTX` from `16384` to `8192`, packing category batches up to `BATCH_SIZE=12` with a compact `BatchDraft` secondary schema, and fixing stopword/substring matching in `search_settings`:
+  * **Narrow / explain / preference / single-setting turns (`explain_aa`, `focused_vsync`, follow-ups):** dropped from `133.6–182.8 s` to **`18.6–31.9 s`** (**4.6×–9.8× faster**; `focused_vsync` now accurately proposes and auto-stages `VSync: On → Off` in `31.9 s`).
+  * **Category optimization (`perf_goal` t1, 12 VALORANT Video settings):** dropped from `283.8 s` to **`74.5 s`** (**3.8× faster**, `0` filtered).
+  * **Comprehensive multi-category setup (`cs2_full_setup`, 21 CS2 candidates across Video/Audio/Game):** improved from **`360.1 s` deadline timeout (fallback)** to **`136.0 s` real AI (`source="ai"`)**, staging **`18` validated settings across Video, Audio, and Game** (`0` filtered, `valuesUnchanged=True`).
+  * **Well-configured state restraint (`well_configured`):** dropped from `228.1 s` (previously forcing 1 extra tweak) to **`45.4 s`** with **`0` forced recommendations**.
+  * **6-case evaluation total:** **`381.9 s`** vs **`1,628.9 s`** baseline (**4.3× overall speedup**), `8/8` real AI turns succeeded without unexpected fallback.
 
-## Limitations (state them in the paper)
+## Limitations (state honestly in the paper)
 
-* Simulation only: no game files are read or written; no frame-rate or latency effect is measured. Suggestions are
-  grounded in documentation, not in measurements of the user's PC (the PC profile is simulated).
-* VALORANT has no public machine-readable settings source; 14 settings rely on secondary sources and 19 section
-  placements after Patch 12.07 are inferred. The VALORANT crosshair editor is not simulated.
-* One model on one Windows PC; macOS instructions are untested. Model outputs vary between runs; the validator and
-  the single repair round bound, but do not eliminate, this variability.
-* Relevant-now ranking is a transparent rule (goal tags × weights), not learned; cross-game transfer is limited to the
-  nine abstract preference dimensions encoded in the catalogues.
-* No participants: claims about comprehension, usability or trust are **not** established by this work.
-
-## Proposed first human evaluation (not conducted)
-
-Within-subjects comparison of A vs B on the same game, catalogue and starting state: participants complete
-goal-based tasks involving unfamiliar settings (e.g. “reduce input latency”, “see players better in dark areas”).
-Primary measure: **independent understanding** of the changed settings (post-task explanation of function and
-trade-off, scored blind). Secondary: task success and time, number of unintended changes, use and acceptance of
-undo/lock/reject, perceived control and trust (questionnaires), and transfer to the second game. The current build
-already logs the needed traces (history sources, proposal decisions, run traces, dismissals with reasons).
+* **Simulation only:** No game config files are read or modified, and no real FPS, GPU frame time, or input latency is measured. PC specs and context events are synthetic fixtures.
+* **VALORANT catalogue provenance:** VALORANT lacks public client UI files; `93` settings rely on dated secondary sources, `43` sliders lack officially published min/max bounds (`rangeVerified: false`, ≈ badge, non-AI-proposable), `19` post-12.07 placements are inferred (ⓘ), and Riot share-code import/export omits unmodeled metadata tokens safely rather than faking support. CS2 `HudEdgeX` uses a `0.50` fixed prototype minimum floor.
+* **Hardware latency bounds on Apple M4 laptop inference:** While `gemma4:12b-it-q4_K_M` (`11.9B Q4_K_M`) is now practically usable on Apple M4 (`18.6–31.9 s` interactive narrow turns; `~74.5 s` category setup), full-game multi-category synthesis (`~136.0 s`) remains slower than real-time chat expectations; pilot sessions should pre-warm Ollama, surface progress feedback, or run on a faster GPU (e.g., RTX 4080 SUPER) when high turn volume is required.
+* **Stochastic model variance & offline rules:** Local LLM outputs vary across runs (bounded but not eliminated by `validate_draft` and 1 repair round); `Discover` ranking uses transparent deterministic rules rather than learned personalization across arbitrary dimensions.
+* **Zero human participants tested:** Track B comprehension, trust, rubber-stamping frequency, and docked-vs-detached workspace preference remain empirical hypotheses under [PARTICIPANT_PILOT.md](PARTICIPANT_PILOT.md), not findings.
