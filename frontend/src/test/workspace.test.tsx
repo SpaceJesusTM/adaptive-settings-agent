@@ -44,6 +44,8 @@ function seedAdaptive(extra: Record<string, unknown> = {}) {
     proposals: { valorant: [PROPOSAL] },
     pendingVideo: {},
     pinnedFeedback: {},
+    openCards: {},
+    seenDiscoverIds: { valorant: [], cs2: [] },
     scenarios: [{ name: "default", title: "Default", description: "Default", synthetic: true }],
     contextTypes: [],
     relevantNow: {
@@ -618,14 +620,16 @@ describe("Final HCI Pass unit coverage", () => {
     });
 
     render(<PreferencesPanel game="valorant" />);
-    expect(screen.getByText(/1\. Current goal/)).toBeInTheDocument();
-    expect(screen.getByText(/2\. General priorities/)).toBeInTheDocument();
-    expect(screen.getByText(/3\. Personal setup facts/)).toBeInTheDocument();
+    expect(screen.getByText("System Understanding")).toBeInTheDocument();
+    expect(screen.getByText(/Current goal · VALORANT/)).toBeInTheDocument();
+    expect(screen.getByText(/What I've noticed automatically/)).toBeInTheDocument();
+    expect(screen.getByText(/What you've asked me to remember/)).toBeInTheDocument();
     expect(screen.getByText(/Priority trade-off:/)).toBeInTheDocument();
     expect(screen.getByText("V")).toBeInTheDocument();
 
+    await userEvent.click(screen.getByText("Add or edit manually"));
     await userEvent.type(screen.getByLabelText("Personal setup value"), "0.35");
-    await userEvent.click(screen.getByRole("button", { name: "Confirm fact" }));
+    await userEvent.click(screen.getByRole("button", { name: "Save note" }));
     expect(addFactSpy).toHaveBeenCalledWith(
       expect.objectContaining({ factKey: "mouse_sensitivity", valueText: "0.35", originGame: "valorant", source: "user_explicit" }),
     );
@@ -737,5 +741,329 @@ describe("Final HCI Pass unit coverage", () => {
     expect(screen.getByText("Mouse Sensitivity (360° hipfire)")).toBeInTheDocument();
     expect(screen.getByText(/VALORANT 0\.35 × \(0\.07 \/ 0\.022\) ≈ CS2 1\.11/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Show in settings" })).toBeInTheDocument();
+  });
+});
+
+describe("Autonomy, Adaptivity & Coherence UI features", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    seedAdaptive();
+  });
+
+  it("System Understanding renders observed provenance, tentative signals, and discrepancy callouts", () => {
+    seedAdaptive({
+      profile: {
+        preferences: [],
+        sessionGoals: { valorant: [], cs2: [] },
+        context: { valorant: null, cs2: null },
+        evidence: [],
+        dimensions: [{ id: "performance", label: "Framerate & performance" }],
+        personalFacts: [],
+        personalFactTypes: [],
+        conflicts: { valorant: [], cs2: [] },
+        observed: {
+          keySettings: [
+            {
+              settingId: "val.general.sensitivity_aim",
+              game: "valorant",
+              label: "Sensitivity: Aim",
+              path: "General > Mouse",
+              controlType: "slider",
+              value: 0.42,
+              display: "0.42",
+              sourceKind: "user_manual",
+              sourceLabel: "Set manually by you",
+              deliberate: true,
+              matchesDefault: false,
+            },
+          ],
+          recentActions: [],
+          tentativeSignals: [
+            {
+              dimension: "performance",
+              dimensionLabel: "Framerate & performance",
+              tentative: true,
+              explanation: "Tentative pattern (not saved): you lowered Material Quality.",
+            },
+          ],
+          discrepancies: [
+            {
+              factId: "pf_disc",
+              factKey: "mouse_sensitivity",
+              label: "Mouse sensitivity",
+              savedValue: "0.35",
+              game: "valorant",
+              settingId: "val.general.sensitivity_aim",
+              settingLabel: "Sensitivity: Aim",
+              liveValue: 0.42,
+              liveDisplay: "0.42",
+              liveSourceKind: "user_manual",
+              explanation: "Saved 0.35 differs from live 0.42.",
+            },
+          ],
+        },
+      },
+    });
+    render(<PreferencesPanel game="valorant" />);
+    expect(screen.getByText("Set manually by you")).toBeInTheDocument();
+    expect(screen.getByText("Tentative — not saved")).toBeInTheDocument();
+    expect(screen.getByText("Notice mismatch (VALORANT)")).toBeInTheDocument();
+    expect(screen.getByText(/Saved 0\.35 differs from live 0\.42/)).toBeInTheDocument();
+  });
+
+  it("Chat renders Saved to System Understanding pill with 1-click Undo and directional cross-game jump button", async () => {
+    const cgChatMsg = {
+      id: "msg_mem",
+      role: "assistant" as const,
+      runId: "run_mem",
+      createdAt: new Date().toISOString(),
+      response: {
+        intent: "preference",
+        reply: "Noted high FPS preference and compared sensitivity.",
+        knownsAndUnknowns: null,
+        goalDimensions: [],
+        recommendations: [],
+        explanations: [],
+        navigateTo: null,
+        preferenceSuggestions: [],
+        appliedMemoryUpdates: [
+          {
+            kind: "preference" as const,
+            id: "pref_mem_1",
+            label: "Prioritize Framerate & performance (durable)",
+            dimension: "performance",
+            scope: "durable" as const,
+            game: "valorant" as const,
+          },
+        ],
+        crossGameComparisons: [
+          {
+            id: "cg_sens_dir",
+            topic: "Hipfire Mouse Sensitivity (360° Distance)",
+            relationship: "similar_with_differences" as const,
+            relationshipLabel: "Direct engine scaling formula (similar)",
+            summary: "Yaw scaling 360° formula.",
+            differences: "HFOV differs.",
+            safetyNote: "Inspect manually.",
+            proposable: false,
+            sourceGame: "valorant" as const,
+            targetGame: "cs2" as const,
+            directionExplicit: true,
+            discrepancyNote: "Saved 0.30 differs from live 0.40.",
+            sourceEvidenceLabel: "Live VALORANT setting (0.4)",
+            targetNavigateGame: "cs2" as const,
+            targetNavigateId: "cs2.kbmouse.mouse_sensitivity",
+            valorantSettings: [],
+            cs2Settings: [],
+          },
+        ],
+        clarifyingQuestion: null,
+        filtered: [],
+        validationNotes: [],
+        provenance: { source: "fallback" as const, model: null, indicator: "fallback" },
+      },
+    };
+    const removePrefSpy = vi.spyOn(api, "removePreference").mockResolvedValue({ ok: true });
+    vi.spyOn(api, "proposals").mockResolvedValue([]);
+    vi.spyOn(api, "thread").mockResolvedValue([cgChatMsg]);
+    vi.spyOn(api, "profile").mockResolvedValue({ preferences: [], sessionGoals: { valorant: [], cs2: [] }, context: { valorant: null, cs2: null }, evidence: [], dimensions: [] });
+    vi.spyOn(api, "relevantNow").mockResolvedValue({ game: "valorant", items: [], trigger: null, createdAt: null, updateAvailable: false });
+    const switchSpy = vi.fn().mockResolvedValue(undefined);
+    const goSpy = vi.fn();
+
+    seedAdaptive({
+      session: { ...session("adaptive"), selectedGame: "valorant" },
+      switchGame: switchSpy,
+      goToSetting: goSpy,
+      chat: { valorant: [cgChatMsg] },
+    });
+    render(<Chat game="valorant" />);
+    expect(screen.getByText(/Prioritize Framerate & performance/)).toBeInTheDocument();
+    expect(screen.getByText("VALORANT → CS2")).toBeInTheDocument();
+    expect(screen.getByText(/Saved 0\.30 differs from live 0\.40/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Undo" }));
+    expect(removePrefSpy).toHaveBeenCalledWith("pref_mem_1");
+    expect(screen.getByText(/Removed from System Understanding/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Show in CS2 settings" }));
+    expect(switchSpy).toHaveBeenCalledWith("cs2");
+    expect(goSpy).toHaveBeenCalledWith("cs2", "cs2.kbmouse.mouse_sensitivity", "assistant");
+  });
+
+  it("AdaptiveWorkspace displays freshness banner, trade-off retained group, large-batch confidence strip, and Discover unseen cue", async () => {
+    const items6 = Array.from({ length: 6 }, (_, idx) => ({
+      ...PROPOSAL.items[0],
+      id: `item_${idx}`,
+      settingId: idx === 0 ? "val.video.bloom" : `val.video.extra_${idx}`,
+      label: idx === 0 ? "Bloom" : `Extra Setting ${idx}`,
+      confidence: idx >= 4 ? ("low" as const) : ("high" as const),
+    }));
+    const largeOutdatedProposal = {
+      ...PROPOSAL,
+      freshnessStatus: "outdated_goal" as const,
+      freshnessWarning: "Prepared when your goal was FPS. Your current goal favors Visual quality.",
+      items: items6,
+      plan: {
+        ...PROPOSAL.plan!,
+        tradeoffRetainedItems: [
+          {
+            settingId: "val.video.texture_quality",
+            label: "Texture Quality",
+            path: "Video > Graphics Quality > Texture Quality",
+            category: "Graphics Quality",
+            currentDisplay: "High",
+            reason: "Retained High to protect your visual quality priority.",
+            whatItDoes: "Controls texture resolution.",
+            tradeoffs: null,
+          },
+        ],
+      },
+    };
+    seedAdaptive({
+      proposals: { valorant: [largeOutdatedProposal] },
+      workspaceTab: "changes",
+      relevantNow: {
+        valorant: {
+          game: "valorant",
+          items: [
+            {
+              cardId: "card_1",
+              kind: "inspect",
+              triggerGroup: "onboarding",
+              checkId: "ob_val_sens",
+              settingId: "val.general.sensitivity_aim",
+              label: "Sensitivity: Aim",
+              path: "General > Mouse",
+              currentValue: 0.35,
+              currentDisplay: "0.35",
+              targetValue: 0.35,
+              targetDisplay: "Manual check",
+              score: 1.15,
+              dimension: "comfort",
+              dimensionLabel: "Comfort",
+              whatItDoes: "Aim speed",
+              whatItDoesSource: "official-doc",
+              why: "Default sensitivity check.",
+              whyOrigin: "onboarding_observation",
+              whyBasis: "official",
+              basedOn: ["observed default"],
+              crossGame: false,
+              tradeoff: null,
+              sourceURL: "https://example.org",
+              verificationStatus: "verified",
+              state: "checked",
+              liveValue: 0.35,
+              liveDisplay: "0.35",
+            },
+            {
+              cardId: "card_unseen",
+              kind: "change",
+              triggerGroup: "followup",
+              settingId: "val.video.nvidia_reflex",
+              label: "NVIDIA Reflex Low Latency",
+              path: "Video > Stats",
+              currentValue: "off",
+              currentDisplay: "Off",
+              targetValue: "on_boost",
+              targetDisplay: "On + Boost",
+              score: 1.25,
+              dimension: "input_latency",
+              dimensionLabel: "Input latency",
+              whatItDoes: "Reduces render queue",
+              whatItDoesSource: "official-doc",
+              why: "VSync is Off.",
+              whyOrigin: "followup_rule",
+              whyBasis: "editorial",
+              basedOn: ["your recent change"],
+              crossGame: false,
+              tradeoff: null,
+              sourceURL: "https://example.org",
+              verificationStatus: "verified",
+              state: "suggested",
+              liveValue: "off",
+              liveDisplay: "Off",
+            },
+          ],
+          trigger: "followup",
+          createdAt: new Date().toISOString(),
+          updateAvailable: false,
+          hasEvidence: true,
+        },
+      },
+    });
+    render(
+      <>
+        <StudyBar />
+        <AdaptiveWorkspace game="valorant" mode="docked" />
+      </>,
+    );
+    expect(screen.getByText("Prepared for an earlier goal")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reject outdated draft" })).toBeInTheDocument();
+    expect(screen.getByText("Retained due to trade-off (1)")).toBeInTheDocument();
+    expect(screen.getByText(/4 medium\/high confidence/)).toBeInTheDocument();
+    expect(screen.getByText(/2 lower confidence/)).toBeInTheDocument();
+    expect(screen.getAllByText("Lower confidence")).toHaveLength(2);
+    expect(screen.getByLabelText("1 unseen Discover suggestions")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Keep medium/high only" }));
+    expect(screen.getByRole("button", { name: "Apply selected changes (4)" })).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("tab", { name: /^Discover/ }));
+    expect(screen.getByText("Checked")).toBeInTheDocument();
+    expect(screen.getByText("Companion check")).toBeInTheDocument();
+  });
+
+  it("HistoryDrawer distinguishes Request excerpt from full Original request and shows Outdated badge", () => {
+    seedAdaptive({
+      historyOpen: true,
+      history: {
+        valorant: [
+          {
+            batchId: "bat_old",
+            game: "valorant",
+            source: "ai_applied",
+            sourceLabel: "AI suggestion (applied)",
+            label: "Suggested changes (1)",
+            proposalId: "prop_1",
+            condition: "adaptive",
+            createdAt: new Date().toISOString(),
+            undoesBatchId: null,
+            undoneByBatchId: null,
+            undoable: true,
+            outdatedForCurrentGoal: true,
+            provenance: {
+              hasRecordedRationale: true,
+              userRequest: "Short truncated goal excerpt…",
+              userRequestIsExcerpt: true,
+              runId: "run_1",
+              model: "gemma4:12b-it-q4_K_M",
+              proposalTitle: "Suggested changes (1)",
+              restagedFromBatchId: null,
+              planReason: null,
+            },
+            events: [
+              {
+                eventId: "ev_1",
+                settingId: "val.video.bloom",
+                label: "Bloom",
+                path: "Video > Graphics Quality > Bloom",
+                oldValue: "on",
+                newValue: "off",
+                oldDisplay: "On",
+                newDisplay: "Off",
+                revisionAfter: 1,
+                stillCurrent: true,
+              },
+            ],
+            gameRevision: 1,
+            values: {},
+          },
+        ],
+      },
+    });
+    render(<HistoryDrawer />);
+    expect(screen.getByText("Request excerpt:")).toBeInTheDocument();
+    expect(screen.getByText("Outdated for current goal")).toBeInTheDocument();
   });
 });

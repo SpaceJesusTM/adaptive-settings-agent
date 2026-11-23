@@ -368,18 +368,20 @@ test.describe("Final HCI Pass journeys: History provenance, Aligned review, My P
     expect(after.values).toEqual(before.values);
   });
 
-  test("My Priorities displays 3 clear sections and persists confirmed personal setup facts without modifying game settings", async ({ page }) => {
+  test("System Understanding displays 3 sections without upfront setup and supports secondary manual note capture", async ({ page }) => {
     await setup(page, { condition: "adaptive", game: "valorant", aiMode: "fallback" });
     const before = await api<{ values: Record<string, { value: unknown }> }>(page, "/api/games/valorant/state");
     await page.getByRole("tab", { name: "My Priorities" }).click();
 
-    await expect(page.getByText(/1\. Current goal/)).toBeVisible();
-    await expect(page.getByText(/2\. General priorities/)).toBeVisible();
-    await expect(page.getByText(/3\. Personal setup facts/)).toBeVisible();
+    await expect(page.getByText("System Understanding")).toBeVisible();
+    await expect(page.getByText(/Current goal · VALORANT/)).toBeVisible();
+    await expect(page.getByText(/What I've noticed automatically/)).toBeVisible();
+    await expect(page.getByText(/What you've asked me to remember/)).toBeVisible();
 
+    await page.getByText("Add or edit manually").click();
     await page.getByLabel("Personal setup type").selectOption("push_to_talk_key");
     await page.getByLabel("Personal setup value").fill("V");
-    await page.getByRole("button", { name: "Confirm fact" }).click();
+    await page.getByRole("button", { name: "Save note" }).click();
     await expect(page.locator(".prefs .pref-item", { hasText: "Push-to-talk key" })).toContainText("V");
 
     await page.reload();
@@ -405,13 +407,13 @@ test.describe("Final HCI Pass journeys: History provenance, Aligned review, My P
     const firstCard = rn.locator(".rec-card").first();
     await firstCard.getByRole("button", { name: "Mark checked" }).click();
     await expect(firstCard.locator(".state-badge")).toHaveText("Checked");
-    await expect(rn.locator(".rn-count")).toHaveText("2");
+    await expect(rn.locator(".rn-count")).toHaveText("3");
 
     await page.getByRole("group", { name: "Game" }).getByRole("button", { name: "VALORANT" }).click();
     await page.getByRole("group", { name: "Game" }).getByRole("button", { name: "CS2" }).click();
     await page.getByRole("tab", { name: /^Discover/ }).click();
     await expect(rn.locator(".rec-card").first().locator(".state-badge")).toHaveText("Checked");
-    await expect(rn.locator(".rn-count")).toHaveText("2");
+    await expect(rn.locator(".rn-count")).toHaveText("3");
 
     // Mark remaining onboarding cards checked -> Revisit first-time checks appears
     const markBtns = rn.getByRole("button", { name: "Mark checked" });
@@ -449,5 +451,81 @@ test.describe("Final HCI Pass journeys: History provenance, Aligned review, My P
 
     const after = await api<{ values: Record<string, { value: unknown }> }>(page, "/api/games/cs2/state");
     expect(after.values).toEqual(before.values);
+  });
+});
+
+test.describe("Autonomy, Adaptivity & Coherence Pass journeys", () => {
+  test("zero-config manual edits reflect in What I've noticed; goal shift flags outdated draft; explicit memory supports 1-click Undo", async ({
+    page,
+  }) => {
+    await setup(page, { condition: "adaptive", game: "valorant", aiMode: "fallback" });
+
+    // Manual edit automatically updates What I've noticed without manual setup
+    await openTab(page, "Video", "Graphics Quality");
+    await row(page, "val.video.bloom").getByRole("radio", { name: "Off" }).click();
+    await expect.poll(() => value(page, "valorant", "val.video.bloom")).toBe("off");
+    await page.getByRole("tab", { name: "My Priorities" }).click();
+    await expect(page.locator(".su-tentative-list")).toContainText("Tentative — not saved");
+
+    // Competitive goal stages a proposal; goal shift to visual quality flags freshness banner
+    await page.getByRole("tab", { name: "Chat" }).click();
+    await askAssistant(page, "I want higher FPS and lower input lag.");
+    await page.getByRole("banner").getByRole("button", { name: /^Workspace/ }).click();
+    await expect(page.locator(".aw-workspace .tray-item").first()).toBeVisible();
+
+    await askAssistant(page, "Actually today I care more about visual quality.");
+    await expect(page.locator(".tray-freshness-banner")).toContainText("Prepared for an earlier goal");
+
+    // Speculative remark & neutral explain must not wipe the new visual_quality goal
+    await askAssistant(page, "I might try lowering latency later");
+    await askAssistant(page, "What does V-Sync do?");
+    const prof = await api<{ sessionGoals: { valorant: { dimensions: string[] }[] } }>(page, "/api/profile?game=valorant");
+    expect(prof.sessionGoals.valorant[0].dimensions).toContain("visual_quality");
+
+    // Explicit memory instruction shows Saved pill + 1-click Undo removes it cleanly
+    await askAssistant(page, "Remember that I prefer V for push-to-talk in VALORANT");
+    const memPill = page.locator(".msg-memory-pill").last();
+    await expect(memPill).toContainText(/Push-to-talk key \(VALORANT\): V/i);
+    await memPill.getByRole("button", { name: "Undo" }).click();
+    await expect(memPill).toContainText("Removed from System Understanding");
+  });
+
+  test("directional VALORANT -> CS2 sensitivity conversion works from VALORANT view using live observed sensitivity", async ({
+    page,
+  }) => {
+    await setup(page, { condition: "adaptive", game: "valorant", aiMode: "fallback" });
+    await openTab(page, "General");
+    const sensInput = row(page, "val.general.sensitivity_aim").getByRole("textbox");
+    await sensInput.fill("0.4");
+    await sensInput.press("Enter");
+    await expect.poll(() => value(page, "valorant", "val.general.sensitivity_aim")).toBe(0.4);
+
+    await askAssistant(page, "What CS2 sensitivity matches my VALORANT sensitivity?");
+    const cgCard = page.locator(".cg-card").last();
+    await expect(cgCard).toContainText("VALORANT → CS2");
+    await expect(cgCard).toContainText("1.27");
+    await cgCard.getByRole("button", { name: "Show in CS2 settings" }).click();
+
+    await expect(page.getByRole("group", { name: "Game" }).getByRole("button", { name: "CS2" })).toHaveAttribute("aria-pressed", "true");
+    await expect(row(page, "cs2.kbmouse.mouse_sensitivity")).toHaveClass(/is-highlighted/);
+  });
+
+  test("detached ?view=workspace proactively receives Discover updates when VSync changes in main window", async ({
+    page,
+    context,
+  }) => {
+    await setup(page, { condition: "adaptive", game: "valorant", aiMode: "fallback" });
+    const detached = await context.newPage();
+    await detached.setViewportSize({ width: 1280, height: 800 });
+    await detached.goto("/?view=workspace&game=valorant");
+    await expect(detached.locator(".standalone-shell")).toBeVisible();
+    await detached.getByRole("tab", { name: /^Discover/ }).click();
+
+    await openTab(page, "Video", "Graphics Quality");
+    await row(page, "val.video.vsync").getByRole("radio", { name: "Off" }).click();
+    await expect.poll(() => value(page, "valorant", "val.video.vsync")).toBe("off");
+
+    await expect(detached.locator(".rn")).toContainText("NVIDIA Reflex Low Latency", { timeout: 10_000 });
+    await detached.close();
   });
 });

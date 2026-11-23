@@ -263,7 +263,7 @@ def test_relevant_now_hold_rule_and_dismissal(services, client):
     reset(services.store, services.settings.scenario_dir, services.settings.backup_dir, "valorant_history_new_cs2", "full", backup=False)
     first = client.get("/api/games/cs2/relevant-now").json()
     ids = [c["settingId"] for c in first["items"]]
-    assert 1 <= len(ids) <= 3 and first["trigger"] == "first_visit"
+    assert 1 <= len(ids) <= 4 and first["trigger"] == "first_visit"
     again = client.get("/api/games/cs2/relevant-now").json()
     assert [c["settingId"] for c in again["items"]] == ids  # held: no reshuffle on reload
     # New evidence (a session goal) does not reshuffle; it only flags an update.
