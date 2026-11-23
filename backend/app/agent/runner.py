@@ -338,8 +338,13 @@ class AgentRunner:
                         "manualCount": audit["manualCount"],
                         "byCategory": audit["byCategory"],
                     },
+                    "alreadyAlignedItems": audit.get("alreadyAlignedItems", []),
+                    "lockedItems": audit.get("lockedItems", []),
+                    "unavailableItems": audit.get("unavailableItems", []),
                     "manualConsiderations": audit["manualConsiderations"][:10],
                 }
+                if audit.get("crossGameComparisons"):
+                    validated["crossGameComparisons"] = audit["crossGameComparisons"]
                 provenance = {
                     "source": "fallback",
                     "model": None,

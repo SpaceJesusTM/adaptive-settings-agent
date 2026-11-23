@@ -9,9 +9,10 @@ from pydantic import BaseModel, Field
 from .. import __version__
 from ..agent.health import describe_status, probe_ollama, reset_cache
 from ..catalog.schema import DIMENSION_LABELS
+from ..domain.cross_game import compare_cross_game
 from ..domain.db import write_tx
 from ..domain.errors import Conflict, Invalid
-from ..domain.profile import CONTEXT_EVENTS
+from ..domain.profile import CONTEXT_EVENTS, PERSONAL_FACT_TYPES
 from ..domain.scenarios import export_state, import_state, list_scenarios, reset, write_backup
 from ..domain.store import Change
 from ..services import Services
@@ -125,6 +126,19 @@ class PreferenceIn(BaseModel):
     game: Optional[Literal["valorant", "cs2"]] = None
     originGame: Optional[Literal["valorant", "cs2"]] = None
     note: Optional[str] = Field(default=None, max_length=200)
+
+
+class PersonalFactIn(BaseModel):
+    factKey: str
+    valueText: str = Field(min_length=1, max_length=120)
+    originGame: Optional[Literal["valorant", "cs2"]] = None
+    sourceSettingId: Optional[str] = None
+    source: Literal["user_explicit", "chat_confirmed"] = "user_explicit"
+    note: Optional[str] = Field(default=None, max_length=200)
+
+
+class DiscoverCheckIn(BaseModel):
+    checkId: str = Field(min_length=1, max_length=80)
 
 
 class ResetIn(BaseModel):
@@ -265,6 +279,13 @@ def history(game: str, request: Request, limit: int = Query(default=100, ge=1, l
 @router.post("/history/{batch_id}/undo")
 def undo(batch_id: str, body: UndoIn, request: Request) -> dict[str, Any]:
     return svc(request).store.undo_batch(batch_id, client_request_id=body.clientRequestId)
+
+
+@router.post("/history/{batch_id}/restage")
+def restage_history(batch_id: str, request: Request) -> dict[str, Any]:
+    s = svc(request)
+    require_adaptive(s)
+    return s.proposals.restage_from_batch(batch_id)
 
 
 @router.put("/games/{game}/pins/{setting_id}")
@@ -444,6 +465,44 @@ def relevant_now_dismiss(game: str, body: DismissIn, request: Request) -> dict[s
     return s.relevant_now.dismiss(game, body.settingId, body.reason)
 
 
+@router.post("/games/{game}/relevant-now/check")
+def relevant_now_check(game: str, body: DiscoverCheckIn, request: Request) -> dict[str, Any]:
+    s = svc(request)
+    s.store.require_game(game)
+    require_adaptive(s)
+    return s.relevant_now.mark_checked(game, body.checkId)
+
+
+@router.post("/games/{game}/relevant-now/onboarding/revisit")
+def relevant_now_revisit_onboarding(game: str, request: Request) -> dict[str, Any]:
+    s = svc(request)
+    s.store.require_game(game)
+    require_adaptive(s)
+    return s.relevant_now.revisit_onboarding(game)
+
+
+@router.get("/cross-game/compare")
+def cross_game_compare(
+    request: Request,
+    game: Literal["valorant", "cs2"] = "cs2",
+    q: str = Query(min_length=1, max_length=200),
+    sourceSensitivity: Optional[float] = None,
+) -> dict[str, Any]:
+    s = svc(request)
+    conn = s.store.connect()
+    try:
+        return compare_cross_game(
+            s.store,
+            s.profile,
+            conn,
+            query=q,
+            current_game=game,
+            source_sensitivity=sourceSensitivity,
+        )
+    finally:
+        conn.close()
+
+
 @router.get("/context-events")
 def context_event_types() -> list[dict[str, Any]]:
     return [{"eventType": k, "label": v["label"], "dimensions": v["dimensions"], "simulated": True} for k, v in CONTEXT_EVENTS.items()]
@@ -471,13 +530,38 @@ def profile(request: Request) -> dict[str, Any]:
     try:
         return {
             "preferences": s.profile.preferences(conn),
+            "personalFacts": s.profile.personal_facts(conn),
+            "personalFactTypes": [{"id": k, **v} for k, v in PERSONAL_FACT_TYPES.items()],
             "sessionGoals": {g: s.profile.session_goals(conn, g) for g in s.registry.games},
+            "conflicts": {g: s.profile.goal_preference_conflicts(conn, g) for g in s.registry.games},
             "context": {g: s.profile.active_context(conn, g) for g in s.registry.games},
             "evidence": s.profile.evidence(conn, 40),
             "dimensions": [{"id": k, "label": v} for k, v in DIMENSION_LABELS.items()],
         }
     finally:
         conn.close()
+
+
+@router.post("/profile/personal-facts")
+def add_personal_fact(body: PersonalFactIn, request: Request) -> dict[str, Any]:
+    s = svc(request)
+    require_adaptive(s)
+    if body.originGame and body.sourceSettingId:
+        s.store.require_setting(body.originGame, body.sourceSettingId)
+    return s.profile.add_personal_fact(
+        fact_key=body.factKey,
+        value_text=body.valueText,
+        origin_game=body.originGame,
+        source_setting_id=body.sourceSettingId,
+        source=body.source,
+        note=body.note,
+    )
+
+
+@router.delete("/profile/personal-facts/{fact_id}")
+def remove_personal_fact(fact_id: str, request: Request) -> dict[str, Any]:
+    svc(request).profile.remove_personal_fact(fact_id)
+    return {"ok": True}
 
 
 @router.post("/profile/preferences")

@@ -1,0 +1,117 @@
+{
+  "name": "valorant_onboarding_to_cs2",
+  "title": "New CS2 player with confirmed VALORANT setup facts & priorities",
+  "description": "Synthetic Scenario 1: the user previously confirmed durable priorities (low input latency, visibility) and explicit personal control facts in VALORANT (0.35 aim sensitivity, V team push-to-talk, Z ping, Cyan static crosshair), and is now opening CS2 for the first time.",
+  "synthetic": true,
+  "hardware": {
+    "label": "Simulated gaming PC",
+    "gpuVendor": "NVIDIA",
+    "gpu": "Simulated NVIDIA GPU (8 GB VRAM)",
+    "cpuCores": 12,
+    "ramGB": 16,
+    "vramGB": 8,
+    "displayRefreshHz": 144,
+    "gsyncDisplay": false
+  },
+  "session": {
+    "condition": "adaptive",
+    "selectedGame": "cs2",
+    "aiMode": "local",
+    "adaptationEnabled": true
+  },
+  "values": {
+    "valorant": {
+      "val.video.vsync": "off",
+      "val.video.nvidia_reflex": "on",
+      "val.video.vignette": "off",
+      "val.general.sensitivity_aim": 0.35,
+      "val.controls.key_team_ptt": "V",
+      "val.controls.key_ping": "Z",
+      "val.crosshair.primary_color": "cyan",
+      "val.crosshair.primary_outlines": "on"
+    }
+  },
+  "preferences": [
+    {
+      "dimension": "input_latency",
+      "direction": "prioritize",
+      "scope": "durable",
+      "originGame": "valorant",
+      "game": "valorant",
+      "source": "seed",
+      "note": "Seeded scenario: saved while playing VALORANT"
+    },
+    {
+      "dimension": "visibility",
+      "direction": "prioritize",
+      "scope": "durable",
+      "originGame": "valorant",
+      "game": "valorant",
+      "source": "seed",
+      "note": "Seeded scenario: saved while playing VALORANT"
+    }
+  ],
+  "personalFacts": [
+    {
+      "factKey": "push_to_talk_key",
+      "label": "Push-to-talk key",
+      "valueText": "V",
+      "originGame": "valorant",
+      "sourceSettingId": "val.controls.key_team_ptt",
+      "source": "seed",
+      "note": "Confirmed from VALORANT Team Voice Chat: Push-To-Talk"
+    },
+    {
+      "factKey": "mouse_sensitivity",
+      "label": "Mouse sensitivity",
+      "valueText": "0.35",
+      "originGame": "valorant",
+      "sourceSettingId": "val.general.sensitivity_aim",
+      "source": "seed",
+      "note": "Confirmed from VALORANT Sensitivity: Aim"
+    },
+    {
+      "factKey": "ping_key",
+      "label": "Ping / callout key",
+      "valueText": "Z",
+      "originGame": "valorant",
+      "sourceSettingId": "val.controls.key_ping",
+      "source": "seed",
+      "note": "Confirmed from VALORANT Ping binding"
+    },
+    {
+      "factKey": "crosshair_style",
+      "label": "Crosshair style",
+      "valueText": "Cyan static with outlines",
+      "originGame": "valorant",
+      "sourceSettingId": "val.crosshair.primary_color",
+      "source": "seed",
+      "note": "Confirmed from VALORANT Primary crosshair style"
+    }
+  ],
+  "evidence": [
+    {
+      "kind": "applied",
+      "dimension": "input_latency",
+      "game": "valorant",
+      "settingId": "val.video.vsync",
+      "detail": "Applied VSync: On -> Off in VALORANT (seeded history)"
+    },
+    {
+      "kind": "applied",
+      "dimension": "input_latency",
+      "game": "valorant",
+      "settingId": "val.video.nvidia_reflex",
+      "detail": "Applied NVIDIA Reflex Low Latency: Off -> On in VALORANT (seeded history)"
+    },
+    {
+      "kind": "applied",
+      "dimension": "visibility",
+      "game": "valorant",
+      "settingId": "val.video.vignette",
+      "detail": "Applied Vignette: On -> Off in VALORANT (seeded history)"
+    }
+  ],
+  "pins": {},
+  "locks": {}
+}

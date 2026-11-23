@@ -18,8 +18,13 @@ from .store import Change, Store
 from .values import ValueError_, availability_problem, display_value, normalize_value, values_equal
 
 MAX_PROPOSAL_ITEMS = 60
-SOURCES = {"ai": "ai_applied", "fallback": "fallback_applied", "rules": "rule_applied"}
-SOURCE_LABELS = {"ai": "Local AI suggestion", "fallback": "Offline fallback (not AI)", "rules": "Rule-based suggestion"}
+SOURCES = {"ai": "ai_applied", "fallback": "fallback_applied", "rules": "rule_applied", "history": "history_applied"}
+SOURCE_LABELS = {
+    "ai": "Local AI suggestion",
+    "fallback": "Offline fallback (not AI)",
+    "rules": "Rule-based suggestion",
+    "history": "Restaged from history",
+}
 
 
 class ProposalService:
@@ -71,6 +76,7 @@ class ProposalService:
                 "runId": p["run_id"], "title": p["title"], "status": p["status"], "createdAt": p["created_at"],
                 "updatedAt": p["updated_at"], "appliedBatchId": p["applied_batch_id"],
                 "autoStaged": bool(p["auto_staged"]) if "auto_staged" in keys else False,
+                "restagedFromBatchId": p["restaged_from_batch_id"] if "restaged_from_batch_id" in keys else None,
                 "plan": loads(p["plan_json"], None) if "plan_json" in keys else None,
                 "items": items}
 
@@ -107,6 +113,7 @@ class ProposalService:
         items: list[dict[str, Any]],
         auto_staged: bool = False,
         plan: Optional[dict[str, Any]] = None,
+        restaged_from_batch_id: Optional[str] = None,
     ) -> str:
         """Validate items, capture server-side baselines and insert proposal rows inside an active write_tx."""
         if source not in SOURCES:
@@ -152,11 +159,11 @@ class ProposalService:
                                 (it.get("basedOn") or None)))
         any_pending = any(r[8] == "pending" for r in staged_rows)
         conn.execute(
-            "INSERT INTO proposals(id, game, source, run_id, title, status, condition, session_id, created_at, updated_at, plan_json, auto_staged) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO proposals(id, game, source, run_id, title, status, condition, session_id, created_at, updated_at, "
+            "plan_json, auto_staged, restaged_from_batch_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (pid, game, source, run_id, (title or "Suggested changes")[:120], "pending" if any_pending else "closed",
              sess.get("condition"), sess.get("sessionId"), ts, ts, dumps(plan) if plan is not None else None,
-             1 if auto_staged else 0),
+             1 if auto_staged else 0, restaged_from_batch_id),
         )
         conn.executemany(
             "INSERT INTO proposal_items(id, proposal_id, position, setting_id, baseline_value_json, baseline_revision, "
@@ -228,12 +235,188 @@ class ProposalService:
         cnt = conn.execute(
             "SELECT COUNT(*) AS n FROM proposal_items WHERE proposal_id = ? AND status = 'pending'", (pid,)
         ).fetchone()["n"]
-        return {
-            "proposalId": pid,
-            "stagedCount": int(cnt),
-            "alreadyPendingCount": already_pending_count,
-            "idempotentReplay": False,
-        }
+        return {"proposalId": pid, "stagedCount": int(cnt), "alreadyPendingCount": already_pending_count,
+                "idempotentReplay": False}
+
+    def restage_from_batch(self, batch_id: str) -> dict[str, Any]:
+        """Construct a new editable proposal from a historical batch without mutating active settings."""
+        conn = self.store.connect()
+        try:
+            b = conn.execute("SELECT * FROM change_batches WHERE id = ?", (batch_id,)).fetchone()
+            if b is None:
+                raise NotFound(f"Unknown history entry {batch_id}")
+            if b["source"] == "reset":
+                raise Invalid("Scenario resets cannot be restaged from history.")
+            game = b["game"]
+            evs = conn.execute("SELECT * FROM change_events WHERE batch_id = ? ORDER BY rowid", (batch_id,)).fetchall()
+            if not evs:
+                raise Invalid("This history entry contains no setting changes.")
+
+            orig_items: dict[str, sqlite3.Row] = {}
+            if b["proposal_id"]:
+                for pit in conn.execute("SELECT * FROM proposal_items WHERE proposal_id = ?", (b["proposal_id"],)):
+                    orig_items[pit["setting_id"]] = pit
+
+            current_vals = self.store.values(conn, game)
+            flat = {k: v["value"] for k, v in current_vals.items()}
+            hw = self.store.hardware(conn)
+            stage_items: list[dict[str, Any]] = []
+            already_aligned: list[dict[str, Any]] = []
+            manual_considerations: list[dict[str, Any]] = []
+            locked_items: list[dict[str, Any]] = []
+            unavailable_items: list[dict[str, Any]] = []
+
+            origin_label = self.store.batch_summary(conn, batch_id)["sourceLabel"]
+            created_day = str(b["created_at"])[:10]
+            fallback_basis = f"Restaged from {origin_label} ({created_day})"
+
+            for e in evs:
+                s = self.store.registry.setting(game, e["setting_id"])
+                if s is None:
+                    continue
+                target_raw = loads(e["new_value_json"])
+                cur = current_vals.get(s.id, {"value": None, "revision": 0})
+                cur_disp = display_value(s, cur["value"])
+                target_disp = display_value(s, target_raw)
+                pit = orig_items.get(s.id)
+
+                if values_equal(cur["value"], target_raw):
+                    already_aligned.append({
+                        "settingId": s.id,
+                        "label": s.exactLabel,
+                        "path": s.canonicalPath,
+                        "category": s.category,
+                        "currentDisplay": cur_disp,
+                        "why": pit["why"] if pit and pit["why"] else f"Matches your earlier target ({target_disp}).",
+                        "whatItDoes": s.description,
+                        "tradeoffs": s.riskOrTradeoffs,
+                    })
+                    continue
+
+                if not s.aiProposable or s.controlType in ("keybind", "preset", "color"):
+                    manual_considerations.append({
+                        "settingId": s.id,
+                        "label": s.exactLabel,
+                        "path": s.canonicalPath,
+                        "category": s.category,
+                        "currentDisplay": cur_disp,
+                        "reason": f"Personal or manual control (earlier value: {target_disp}). Adjust directly if you still want that target.",
+                        "whatItDoes": s.description,
+                        "tradeoffs": s.riskOrTradeoffs,
+                    })
+                    continue
+
+                try:
+                    normalized_target = normalize_value(s, target_raw, strict=True)
+                except ValueError_ as exc:
+                    unavailable_items.append({
+                        "settingId": s.id,
+                        "label": s.exactLabel,
+                        "path": s.canonicalPath,
+                        "reason": str(exc),
+                    })
+                    continue
+
+                if self.store.is_locked(conn, game, s.id):
+                    locked_items.append({
+                        "settingId": s.id,
+                        "label": s.exactLabel,
+                        "path": s.canonicalPath,
+                        "reason": f"Locked from proposed changes (earlier value: {target_disp}).",
+                    })
+                    continue
+
+                prob = availability_problem(self.store.registry, s, {**flat, s.id: normalized_target}, hw)
+                if prob:
+                    unavailable_items.append({
+                        "settingId": s.id,
+                        "label": s.exactLabel,
+                        "path": s.canonicalPath,
+                        "reason": prob,
+                    })
+                    continue
+
+                stage_items.append({
+                    "settingId": s.id,
+                    "proposedValue": normalized_target,
+                    "why": pit["why"] if pit and pit["why"] else None,
+                    "tradeoff": pit["tradeoff"] if pit and pit["tradeoff"] else s.riskOrTradeoffs,
+                    "confidence": pit["confidence"] if pit and pit["confidence"] else None,
+                    "dimensions": loads(pit["dimensions_json"], []) if pit else [],
+                    "basedOn": pit["based_on"] if pit and pit["based_on"] else fallback_basis,
+                })
+
+            plan_meta = {
+                "scope": "focused" if len(evs) <= 3 else "broad_optimization",
+                "maxRecommendations": len(evs),
+                "includeMinor": True,
+                "isSupplement": False,
+                "reason": (
+                    f"Restaged from {origin_label} ({created_day}). "
+                    f"{len(stage_items)} change(s) ready to review, {len(already_aligned)} already matching that configuration."
+                ),
+                "inferredDimensions": [],
+                "autoStage": False,
+                "partialCoverage": False,
+                "batchesCompleted": 1,
+                "batchesTotal": 1,
+                "restagedFromBatchId": batch_id,
+                "coverage": {
+                    "evaluatedCount": len(evs),
+                    "eligibleCount": len(stage_items),
+                    "proposedCount": len(stage_items),
+                    "alreadyAlignedCount": len(already_aligned),
+                    "alreadyStagedCount": 0,
+                    "lockedCount": len(locked_items),
+                    "unavailableCount": len(unavailable_items),
+                    "manualCount": len(manual_considerations),
+                    "byCategory": {},
+                },
+                "alreadyAlignedItems": already_aligned,
+                "manualConsiderations": manual_considerations,
+                "lockedItems": locked_items,
+                "unavailableItems": unavailable_items,
+            }
+
+            if not stage_items:
+                return {
+                    "proposal": None,
+                    "stagedCount": 0,
+                    "alreadyAlignedItems": already_aligned,
+                    "manualConsiderations": manual_considerations,
+                    "lockedItems": locked_items,
+                    "unavailableItems": unavailable_items,
+                    "message": (
+                        "All restageable settings from that entry already match their earlier values"
+                        if already_aligned and not (locked_items or manual_considerations or unavailable_items)
+                        else "No actionable changes could be restaged automatically; see current status below."
+                    ),
+                }
+
+            with write_tx(conn):
+                pid = self._insert_proposal_tx(
+                    conn,
+                    game,
+                    source="history",
+                    run_id=None,
+                    title=f"Restaged: {(b['label'] or 'Previous changes')[:95]}",
+                    items=stage_items[:MAX_PROPOSAL_ITEMS],
+                    auto_staged=False,
+                    plan=plan_meta,
+                    restaged_from_batch_id=batch_id,
+                )
+            proposal = self.get(pid)
+            return {
+                "proposal": proposal,
+                "stagedCount": len(stage_items),
+                "alreadyAlignedItems": already_aligned,
+                "manualConsiderations": manual_considerations,
+                "lockedItems": locked_items,
+                "unavailableItems": unavailable_items,
+                "message": f"Prepared {len(stage_items)} change(s) in Changes for review — nothing applied yet.",
+            }
+        finally:
+            conn.close()
 
     def _pending_item(self, conn: sqlite3.Connection, proposal_id: str, item_id: str) -> sqlite3.Row:
         p = conn.execute("SELECT * FROM proposals WHERE id = ?", (proposal_id,)).fetchone()

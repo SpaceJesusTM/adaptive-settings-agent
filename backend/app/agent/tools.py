@@ -14,6 +14,7 @@ from typing import Any, Callable, Optional
 from pydantic import BaseModel, Field
 
 from ..catalog.schema import DIMENSION_LABELS, Setting
+from ..domain.cross_game import compare_cross_game
 from ..domain.profile import ProfileService
 from ..domain.store import Store
 from ..domain.values import availability_problem, display_value
@@ -184,14 +185,31 @@ def get_user_preferences(ctx: ToolContext) -> dict[str, Any]:
     try:
         prefs = ctx.profile.preferences(conn)
         goals = ctx.profile.session_goals(conn, ctx.game)
+        facts = ctx.profile.personal_facts(conn)
         context = ctx.profile.active_context(conn, ctx.game)
         return {
             "saved_preferences": [{"goal": p["dimensionLabel"], "direction": p["direction"], "scope": p["scope"],
                                    "from_game": p.get("originGame"),
                                    "evidence": [e["detail"] for e in p["evidence"][:3] if e.get("detail")]} for p in prefs],
+            "personal_setup_facts": [{"label": f["label"], "value": f["valueText"], "from_game": f.get("originGame")} for f in facts],
             "session_goals": [{"text": g["text"], "goals": [DIMENSION_LABELS.get(d, d) for d in g["dimensions"]]} for g in goals],
             "simulated_context_event": context["label"] if context else None,
         }
+    finally:
+        conn.close()
+
+
+def compare_cross_game_settings(ctx: ToolContext, query: str, source_sensitivity: Optional[float] = None) -> dict[str, Any]:
+    conn = ctx.store.connect()
+    try:
+        return compare_cross_game(
+            ctx.store,
+            ctx.profile,
+            conn,
+            query=query,
+            current_game=ctx.game,
+            source_sensitivity=source_sensitivity,
+        )
     finally:
         conn.close()
 
@@ -226,6 +244,11 @@ class _HistoryArgs(BaseModel):
     limit: int = Field(default=8, description="Number of recent change batches (1-15).")
 
 
+class _CrossGameArgs(BaseModel):
+    query: str = Field(description="Topic to compare across VALORANT and CS2, e.g. 'push-to-talk', 'mouse sensitivity', 'abilities'.")
+    source_sensitivity: Optional[float] = Field(default=None, description="Explicit confirmed hipfire sensitivity from the source game, if provided.")
+
+
 TOOL_SPECS: dict[str, dict[str, Any]] = {
     "get_current_ui_state": {"fn": get_current_ui_state, "args": _NoArgs,
                              "description": "Read the current game, the menu location the user is viewing, locks, pins and the simulated PC."},
@@ -236,9 +259,11 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
     "search_settings": {"fn": search_settings, "args": _SearchArgs,
                         "description": "Search this game's settings catalogue by words or goal."},
     "get_user_preferences": {"fn": get_user_preferences, "args": _NoArgs,
-                             "description": "Read saved preferences (with evidence), session goals and any simulated context event."},
+                             "description": "Read saved preferences, confirmed personal setup facts, session goals and any simulated context event."},
     "get_change_history": {"fn": get_change_history, "args": _HistoryArgs,
                            "description": "Read recent setting changes and whether they were undone."},
+    "compare_cross_game_settings": {"fn": compare_cross_game_settings, "args": _CrossGameArgs,
+                                    "description": "Compare curated VALORANT <-> CS2 equivalents, sensitivity conversion caveats, and personal-control boundaries across both catalogues."},
 }
 
 

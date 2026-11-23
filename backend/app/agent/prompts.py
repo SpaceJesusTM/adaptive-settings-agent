@@ -142,6 +142,15 @@ def _state_lines(ctx: ToolContext, conn, *, compact: bool = False) -> list[str]:
                 ev = "; ".join(e["detail"] for e in p["evidence"][:1] if e.get("detail"))
                 pref_lines.append(f"{p['direction']} {p['dimensionLabel']} ({p['scope']}{src})" + (f" [evidence: {_trim(ev, 90)}]" if ev else ""))
         lines.append("SAVED PREFERENCES: " + " | ".join(pref_lines))
+    facts = profile.personal_facts(conn)
+    if facts and not compact:
+        lines.append(
+            "CONFIRMED PERSONAL SETUP PREFERENCES (never auto-apply across games): "
+            + "; ".join(f"{f['label']}={f['valueText']} ({game_name(f.get('originGame'))})" for f in facts)
+        )
+    conflicts = profile.goal_preference_conflicts(conn, game)
+    if conflicts and not compact:
+        lines.append("GOAL/PREFERENCE TRADE-OFF: " + "; ".join(c["explanation"] for c in conflicts[:2]))
     if context_event:
         lines.append(f"SIMULATED CONTEXT EVENT (not a measurement): {context_event['label']}")
     if session.get("condition") == "adaptive" and not session.get("adaptationEnabled", True):
@@ -199,6 +208,7 @@ def render_context(
     batch_candidates: Optional[list[str]] = None,
     batch_label: Optional[str] = None,
     compact_state: bool = False,
+    cross_game_data: Optional[dict[str, Any]] = None,
 ) -> str:
     store, game = ctx.store, ctx.game
     conn = store.connect()
@@ -280,11 +290,37 @@ def render_context(
         if batch_label:
             summary += f" | Current batch focus: {batch_label}"
         manual_names = [m["label"] for m in audit.get("manualConsiderations", [])[:5]]
+        aligned_names = [f"{a['label']} ({a['currentDisplay']})" for a in audit.get("alreadyAlignedItems", [])[:4]]
+        if aligned_names and not compact_state:
+            summary += f" | Notable already-aligned settings: {', '.join(aligned_names)}"
         if manual_names and not compact_state:
             summary += f" | Manual settings to mention if relevant: {', '.join(manual_names)}"
         blocks.append(_block("coverage facts (do not invent other counts)", summary))
 
     blocks.append(_block("settings (id | path | cur | allowed | facts)", "\n".join(settings_lines) if settings_lines else "(none)"))
+
+    if cross_game_data and not compact_state:
+        cg_lines: list[str] = []
+        for comp in cross_game_data.get("comparisons", [])[:3]:
+            val_txt = ", ".join(f"{s['label']}={s['currentDisplay']} ({s['path']})" for s in comp.get("valorantSettings", []))
+            cs2_txt = ", ".join(f"{s['label']}={s['currentDisplay']} ({s['path']})" for s in comp.get("cs2Settings", []))
+            line = f"{comp['topic']} [{comp['relationshipLabel']}]: {comp['summary']} Differences: {comp['differences']}"
+            if val_txt:
+                line += f" | VALORANT: {val_txt}"
+            if cs2_txt:
+                line += f" | CS2: {cs2_txt}"
+            conv = comp.get("sensitivityConversion")
+            if conv:
+                if conv.get("convertible"):
+                    line += f" | 360_estimate: {conv['formula']} (assumptions: {', '.join(conv['assumptions'])}; caveats: {' '.join(conv['caveats'])})"
+                else:
+                    line += f" | sensitivity_note: {conv.get('reason')}"
+            line += f" | safety: {comp['safetyNote']}"
+            cg_lines.append(line)
+        if not cg_lines and cross_game_data.get("note"):
+            cg_lines.append(cross_game_data["note"])
+        if cg_lines:
+            blocks.append(_block("cross-game comparison (grounded across both catalogues; never copy personal keys/sens automatically)", "\n".join(cg_lines)))
 
     if batch_candidates is None:
         convo = recent_conversation(store, game)

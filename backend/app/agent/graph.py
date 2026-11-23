@@ -21,10 +21,11 @@ from typing import Any, Callable, Optional, TypedDict
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 
+from ..domain.cross_game import compare_cross_game
 from ..domain.planner import build_coverage_audit
 from ..domain.profile import ProfileService
 from ..domain.store import Store
-from .intent import detect_dimensions
+from .intent import detect_dimensions, extract_sensitivity_number, is_cross_game_query
 from .prompts import (
     compose_batch_messages,
     compose_messages,
@@ -76,6 +77,7 @@ class TurnState(TypedDict, total=False):
     batch_partial: bool
     batches_completed: int
     batches_total: int
+    cross_game_data: Optional[dict[str, Any]]
     needs_plan: bool
     started_mono: float
 
@@ -184,6 +186,28 @@ def build_turn_graph(
             "ms": round((time.perf_counter() - t0) * 1000),
         })
 
+        cross_game_data = None
+        if is_cross_game_query(state["message"]):
+            conn_cg = store.connect()
+            try:
+                cross_game_data = compare_cross_game(
+                    store,
+                    profile,
+                    conn_cg,
+                    query=state["message"],
+                    current_game=state["game"],
+                    source_sensitivity=extract_sensitivity_number(state["message"]),
+                )
+            finally:
+                conn_cg.close()
+            trace.append({
+                "tool": "compare_cross_game_settings",
+                "by": "workflow",
+                "args": {"query": state["message"][:80]},
+                "ok": True,
+                "ms": 1,
+            })
+
         audit_ids = [c["settingId"] for c in audit["candidates"][: max(1, scope_plan.max_recs)]]
         if scope_plan.scope == "explain_only":
             candidates = [h["id"] for h in searched][:6]
@@ -201,6 +225,7 @@ def build_turn_graph(
             elif (
                 scope_plan.scope == "explain_only"
                 and not searched
+                and cross_game_data is None
                 and not recent_conversation(store, state["game"], exchanges=1)
             ):
                 needs_plan = True
@@ -216,6 +241,7 @@ def build_turn_graph(
             weights=weights,
             scope_plan=scope_plan,
             audit=audit,
+            cross_game_data=cross_game_data,
         )
         return {
             "scope_plan": scope_plan,
@@ -223,6 +249,7 @@ def build_turn_graph(
             "audit": audit,
             "context": context,
             "candidates": candidates,
+            "cross_game_data": cross_game_data,
             "trace": trace,
             "tool_rounds": 0,
             "observations": [],
@@ -500,8 +527,13 @@ def build_turn_graph(
                     "manualCount": audit["manualCount"],
                     "byCategory": audit["byCategory"],
                 },
+                "alreadyAlignedItems": audit.get("alreadyAlignedItems", []),
+                "lockedItems": audit.get("lockedItems", []),
+                "unavailableItems": audit.get("unavailableItems", []),
                 "manualConsiderations": audit["manualConsiderations"][:10],
             }
+            if state.get("cross_game_data") and state["cross_game_data"].get("comparisons"):
+                validated["crossGameComparisons"] = state["cross_game_data"]["comparisons"]
         return {"validated": validated, "repair_feedback": feedback}
 
     def after_prepare(state: TurnState) -> str:

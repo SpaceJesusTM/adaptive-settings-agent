@@ -19,6 +19,52 @@ from .store import Store
 
 DIMENSIONS = list(DIMENSION_LABELS)
 
+PERSONAL_FACT_TYPES: dict[str, dict[str, Any]] = {
+    "mouse_sensitivity": {
+        "label": "Mouse sensitivity",
+        "description": "Your preferred hipfire aiming sensitivity in a source game (used only with explicit conversion caveats, never auto-applied).",
+        "placeholder": "e.g. 0.35",
+    },
+    "push_to_talk_key": {
+        "label": "Push-to-talk key",
+        "description": "Your usual voice chat keybinding (used to point out analogous voice keys across games, never copied automatically).",
+        "placeholder": "e.g. V",
+    },
+    "voice_activation": {
+        "label": "Voice chat mode",
+        "description": "Whether you prefer Push-to-Talk, Open Mic, or team/party voice conventions.",
+        "placeholder": "e.g. Push-to-Talk",
+    },
+    "ping_key": {
+        "label": "Ping / callout key",
+        "description": "Your preferred tactical ping keybinding.",
+        "placeholder": "e.g. Z",
+    },
+    "crouch_walk_convention": {
+        "label": "Movement / crouch-walk habit",
+        "description": "Hold vs Toggle crouch/walk preference or Shift/Ctrl convention.",
+        "placeholder": "e.g. Hold Walk / Hold Duck",
+    },
+    "crosshair_style": {
+        "label": "Crosshair style",
+        "description": "High-level visual style (color, center dot, outlines, static vs dynamic) — never assumed pixel-identical across engines.",
+        "placeholder": "e.g. Cyan static with outlines",
+    },
+    "utility_key_habit": {
+        "label": "Ability / utility key habit",
+        "description": "How you organize utility/grenade binds across hands.",
+        "placeholder": "e.g. Q / E / C for core utility",
+    },
+}
+
+CONFLICT_PAIRS: dict[str, tuple[str, ...]] = {
+    "performance": ("visual_quality",),
+    "input_latency": ("visual_quality",),
+    "visual_quality": ("performance", "input_latency", "focus"),
+    "visibility": ("visual_quality",),
+    "focus": ("visual_quality",),
+}
+
 CONTEXT_EVENTS: dict[str, dict[str, Any]] = {
     "frame_drops": {"label": "Frame-rate dips were reported in your last match", "dimensions": ["performance"]},
     "ranked_session": {"label": "You are starting a competitive (ranked) session", "dimensions": ["input_latency", "visibility"]},
@@ -203,3 +249,196 @@ class ProfileService:
     def signature(weights: dict[str, dict[str, Any]]) -> str:
         items = sorted((d, round(v["weight"], 2)) for d, v in weights.items() if abs(v["weight"]) > 1e-9)
         return hashlib.sha1(repr(items).encode()).hexdigest()[:12]
+
+    # ------------------------------------------------------------------ personal setup facts
+    def personal_facts(self, conn: sqlite3.Connection) -> list[dict[str, Any]]:
+        rows = conn.execute(
+            "SELECT * FROM personal_setup_facts WHERE active = 1 ORDER BY created_at"
+        ).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "factKey": r["fact_key"],
+                "label": r["label"],
+                "valueText": r["value_text"],
+                "originGame": r["origin_game"],
+                "sourceSettingId": r["source_setting_id"],
+                "source": r["source"],
+                "note": r["note"],
+                "createdAt": r["created_at"],
+            }
+            for r in rows
+        ]
+
+    def add_personal_fact(
+        self,
+        *,
+        fact_key: str,
+        value_text: str,
+        origin_game: Optional[str],
+        source_setting_id: Optional[str],
+        source: str,
+        note: Optional[str] = None,
+    ) -> dict[str, Any]:
+        if fact_key not in PERSONAL_FACT_TYPES:
+            raise Invalid(f"Unknown personal setup preference type '{fact_key}'")
+        if source not in ("user_explicit", "chat_confirmed", "seed"):
+            raise Invalid("Personal setup facts require explicit user confirmation.")
+        clean_val = (value_text or "").strip()
+        if not clean_val or len(clean_val) > 120:
+            raise Invalid("Value must be 1 to 120 characters.")
+        spec = PERSONAL_FACT_TYPES[fact_key]
+        conn = self.store.connect()
+        try:
+            with write_tx(conn):
+                ts = now_iso()
+                conn.execute(
+                    "UPDATE personal_setup_facts SET active = 0, updated_at = ? "
+                    "WHERE fact_key = ? AND COALESCE(origin_game, '') = ? AND active = 1",
+                    (ts, fact_key, origin_game or ""),
+                )
+                fid = new_id("fact")
+                conn.execute(
+                    "INSERT INTO personal_setup_facts(id, fact_key, label, value_text, origin_game, "
+                    "source_setting_id, source, note, active, created_at, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,1,?,?)",
+                    (fid, fact_key, spec["label"], clean_val, origin_game, source_setting_id, source, note, ts, ts),
+                )
+                self.add_evidence(
+                    conn,
+                    kind="personal_fact_set",
+                    game=origin_game,
+                    setting_id=source_setting_id,
+                    detail=f"Confirmed {spec['label']}: {clean_val}"
+                    + (f" ({game_name(origin_game)})" if origin_game else ""),
+                )
+            return {"id": fid}
+        finally:
+            conn.close()
+
+    def remove_personal_fact(self, fact_id: str) -> None:
+        conn = self.store.connect()
+        try:
+            with write_tx(conn):
+                row = conn.execute("SELECT * FROM personal_setup_facts WHERE id = ?", (fact_id,)).fetchone()
+                if row is None:
+                    raise NotFound("Unknown personal setup preference")
+                conn.execute(
+                    "UPDATE personal_setup_facts SET active = 0, updated_at = ? WHERE id = ?",
+                    (now_iso(), fact_id),
+                )
+                self.add_evidence(
+                    conn,
+                    kind="personal_fact_removed",
+                    game=row["origin_game"],
+                    setting_id=row["source_setting_id"],
+                    detail=f"Removed personal preference for {row['label']}",
+                )
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------ conflicts & onboarding state
+    def goal_preference_conflicts(self, conn: sqlite3.Connection, game: str) -> list[dict[str, Any]]:
+        goals = self.session_goals(conn, game)
+        if not goals:
+            return []
+        prefs = self.preferences(conn)
+        conflicts: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for g in goals:
+            g_dims = set(g["dimensions"])
+            for gd in g["dimensions"]:
+                opposing = CONFLICT_PAIRS.get(gd, ())
+                for p in prefs:
+                    key = (gd, p["id"])
+                    if key in seen:
+                        continue
+                    if p["dimension"] == gd and p["direction"] == "deprioritize":
+                        seen.add(key)
+                        conflicts.append({
+                            "goalDimension": gd,
+                            "goalDimensionLabel": DIMENSION_LABELS.get(gd, gd),
+                            "preferenceId": p["id"],
+                            "preferenceLabel": p["dimensionLabel"],
+                            "preferenceDirection": p["direction"],
+                            "scope": p["scope"],
+                            "explanation": (
+                                f"Your current goal asks for {DIMENSION_LABELS.get(gd, gd)}, while your saved "
+                                f"preference de-prioritizes it. Your current goal leads this session's guidance."
+                            ),
+                        })
+                    elif p["dimension"] in opposing and p["direction"] == "prioritize" and p["dimension"] not in g_dims:
+                        seen.add(key)
+                        conflicts.append({
+                            "goalDimension": gd,
+                            "goalDimensionLabel": DIMENSION_LABELS.get(gd, gd),
+                            "preferenceId": p["id"],
+                            "preferenceLabel": p["dimensionLabel"],
+                            "preferenceDirection": p["direction"],
+                            "scope": p["scope"],
+                            "explanation": (
+                                f"Your current goal ({DIMENSION_LABELS.get(gd, gd)}) can trade off against your "
+                                f"saved priority ({p['dimensionLabel']}). Your current goal leads here while "
+                                f"trade-offs stay visible."
+                            ),
+                        })
+        return conflicts
+
+    def get_onboarding(self, conn: sqlite3.Connection, game: str) -> dict[str, Any]:
+        row = conn.execute("SELECT * FROM onboarding_state WHERE game = ?", (game,)).fetchone()
+        if row is None:
+            return {
+                "game": game,
+                "status": None,
+                "completedChecks": [],
+                "dismissedChecks": [],
+                "firstVisitedAt": None,
+            }
+        return {
+            "game": game,
+            "status": row["status"],
+            "completedChecks": loads(row["completed_checks_json"], []),
+            "dismissedChecks": loads(row["dismissed_checks_json"], []),
+            "firstVisitedAt": row["first_visited_at"],
+        }
+
+    def ensure_onboarding_tx(self, conn: sqlite3.Connection, game: str) -> dict[str, Any]:
+        row = conn.execute("SELECT * FROM onboarding_state WHERE game = ?", (game,)).fetchone()
+        if row is None:
+            ts = now_iso()
+            conn.execute(
+                "INSERT INTO onboarding_state(game, first_visited_at, status, completed_checks_json, "
+                "dismissed_checks_json, updated_at) VALUES (?,?,?,?,?,?)",
+                (game, ts, "active", "[]", "[]", ts),
+            )
+        return self.get_onboarding(conn, game)
+
+    def mark_onboarding_check(self, conn: sqlite3.Connection, game: str, check_id: str, action: str = "complete") -> dict[str, Any]:
+        state = self.ensure_onboarding_tx(conn, game)
+        completed = list(dict.fromkeys(state["completedChecks"]))
+        dismissed = list(dict.fromkeys(state["dismissedChecks"]))
+        if action == "complete":
+            if check_id not in completed:
+                completed.append(check_id)
+        else:
+            if check_id not in dismissed:
+                dismissed.append(check_id)
+        conn.execute(
+            "UPDATE onboarding_state SET completed_checks_json = ?, dismissed_checks_json = ?, updated_at = ? WHERE game = ?",
+            (dumps(completed), dumps(dismissed), now_iso(), game),
+        )
+        return self.get_onboarding(conn, game)
+
+    def set_onboarding_status_tx(self, conn: sqlite3.Connection, game: str, status: str, *, clear_dismissed: bool = False) -> dict[str, Any]:
+        self.ensure_onboarding_tx(conn, game)
+        if clear_dismissed:
+            conn.execute(
+                "UPDATE onboarding_state SET status = ?, dismissed_checks_json = '[]', updated_at = ? WHERE game = ?",
+                (status, now_iso(), game),
+            )
+        else:
+            conn.execute(
+                "UPDATE onboarding_state SET status = ?, updated_at = ? WHERE game = ?",
+                (status, now_iso(), game),
+            )
+        return self.get_onboarding(conn, game)

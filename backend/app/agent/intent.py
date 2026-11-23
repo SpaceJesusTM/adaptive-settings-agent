@@ -37,6 +37,17 @@ RECOMMEND_PATTERNS = [
     r"\b(what else|anything else|minor tweaks|more tweaks|more settings|additional changes)\b",
     r"\bwhat should i (change|set|do|adjust)\b",
 ]
+CROSS_GAME_RE = re.compile(
+    r"(\bvalorant\b.*\bcs2\b|\bcs2\b.*\bvalorant\b"
+    r"|\b(equivalent|carry over|same key|analogous|compare.*with|from valorant|from cs2|based on valorant|based on cs2)\b"
+    r"|\b(transfer|convert)\b.*\b(sens|sensitivity|key|keys|keybind|crosshair|abilities|grenade)\b"
+    r"|\babilities\b.*\b(grenade|utility|cs2)\b|\b(grenade|utility)\b.*\b(abilities|valorant)\b)",
+    re.I,
+)
+SENS_VALUE_RE = re.compile(
+    r"(?:sens(?:itivity)?\s*(?:is|of|=|:)?\s*|my\s+)(\d+(?:\.\d+)?)\s*(?:sens|sensitivity|in\s+valorant|in\s+cs2|valorant|cs2)?",
+    re.I,
+)
 SESSION_HINTS = [r"\btoday\b", r"\bthis session\b", r"\bfor now\b", r"\bjust this\b", r"\btonight\b"]
 DEPRIORITIZE_HINTS = [r"\bdon't care about\b", r"\bdo not care about\b", r"\bless important\b", r"\bnot bothered about\b"]
 
@@ -91,6 +102,21 @@ def preference_direction_for(text: str, dimension: str) -> str:
 def first_sentence(text: str, limit: int = 160) -> str:
     text = re.sub(r"\s+", " ", (text or "")).strip()
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def is_cross_game_query(text: str) -> bool:
+    return bool(CROSS_GAME_RE.search(text or ""))
+
+
+def extract_sensitivity_number(text: str) -> Optional[float]:
+    m = SENS_VALUE_RE.search(text or "")
+    if not m:
+        return None
+    try:
+        val = float(m.group(1))
+        return val if 0.05 <= val <= 8.0 else None
+    except ValueError:
+        return None
 
 
 def mentioned_setting_terms(text: str) -> Optional[str]:

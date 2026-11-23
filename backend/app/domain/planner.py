@@ -40,6 +40,22 @@ def _manual_reason(s: Setting) -> str:
     return "Personal or hardware-specific setting — adjust manually if needed."
 
 
+def _goal_why_for(s: Setting, positive: dict[str, dict[str, Any]]) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Return (dimension, dimensionLabel, why) for the highest-weighted matching hint, if any."""
+    best = None
+    best_w = -1.0
+    for h in s.goalHints:
+        entry = positive.get(h.dimension)
+        if entry and entry["weight"] > best_w:
+            best_w = entry["weight"]
+            best = h
+    if best is None and s.goalHints:
+        best = s.goalHints[0]
+    if best is None:
+        return None, None, None
+    return best.dimension, DIMENSION_LABELS.get(best.dimension, best.dimension), best.why
+
+
 def build_coverage_audit(
     store: Store,
     profile: ProfileService,
@@ -74,7 +90,7 @@ def build_coverage_audit(
     } if exclude_dismissed else set()
 
     candidates: list[dict[str, Any]] = []
-    already_aligned: list[dict[str, Any]] = []
+    already_aligned: list[tuple[float, int, dict[str, Any]]] = []
     already_staged: list[dict[str, Any]] = []
     locked_items: list[dict[str, Any]] = []
     unavailable_items: list[dict[str, Any]] = []
@@ -103,6 +119,7 @@ def build_coverage_audit(
         # Check whether this setting relates to any positive goal dimension (via hints or tags).
         relevant_hints = [h for h in s.goalHints if h.dimension in positive]
         relevant_tags = [t for t in s.goalTags if t in positive]
+        top_dim, top_dim_label, top_why = _goal_why_for(s, positive)
 
         if not s.aiProposable or s.controlType in ("keybind", "preset"):
             if relevant_hints or relevant_tags:
@@ -114,6 +131,9 @@ def build_coverage_audit(
                         "path": s.canonicalPath,
                         "category": s.category,
                         "currentDisplay": display_value(s, current),
+                        "dimension": top_dim,
+                        "dimensionLabel": top_dim_label,
+                        "why": top_why,
                         "reason": _manual_reason(s),
                         "whatItDoes": s.description,
                         "tradeoffs": s.riskOrTradeoffs,
@@ -129,7 +149,16 @@ def build_coverage_audit(
 
         if s.id in locked_set:
             cat_bucket["locked"] += 1
-            locked_items.append({"settingId": s.id, "label": s.exactLabel, "path": s.canonicalPath})
+            locked_items.append({
+                "settingId": s.id,
+                "label": s.exactLabel,
+                "path": s.canonicalPath,
+                "currentDisplay": display_value(s, current),
+                "dimension": top_dim,
+                "dimensionLabel": top_dim_label,
+                "why": top_why,
+                "reason": "Locked by you against AI suggestions.",
+            })
             continue
 
         if s.id in staged_set:
@@ -144,7 +173,13 @@ def build_coverage_audit(
         prob = availability_problem(store.registry, s, values, hw)
         if prob:
             cat_bucket["unavailable"] += 1
-            unavailable_items.append({"settingId": s.id, "label": s.exactLabel, "reason": prob})
+            unavailable_items.append({
+                "settingId": s.id,
+                "label": s.exactLabel,
+                "path": s.canonicalPath,
+                "currentDisplay": display_value(s, current),
+                "reason": prob,
+            })
             continue
 
         # Score candidate hints against current value
@@ -167,14 +202,24 @@ def build_coverage_audit(
         if not scored:
             if satisfied_dims or not skipped_minor:
                 cat_bucket["alreadyAligned"] += 1
-                already_aligned.append(
+                sat_hint = next((h for h in relevant_hints if h.dimension in satisfied_dims), relevant_hints[0])
+                sat_weight = max((positive[d]["weight"] for d in satisfied_dims), default=0.5)
+                already_aligned.append((
+                    sat_weight,
+                    s.order,
                     {
                         "settingId": s.id,
                         "label": s.exactLabel,
                         "path": s.canonicalPath,
+                        "category": s.category,
                         "currentDisplay": display_value(s, current),
-                    }
-                )
+                        "dimension": sat_hint.dimension,
+                        "dimensionLabel": DIMENSION_LABELS.get(sat_hint.dimension, sat_hint.dimension),
+                        "why": sat_hint.why,
+                        "whatItDoes": s.description,
+                        "tradeoffs": s.riskOrTradeoffs,
+                    },
+                ))
             else:
                 not_relevant_count += 1
             continue
@@ -185,14 +230,24 @@ def build_coverage_audit(
         # Do not override a higher-or-equal priority dimension that the current value already satisfies
         if any(positive[d]["weight"] >= positive[best_hint.dimension]["weight"] for d in satisfied_dims):
             cat_bucket["alreadyAligned"] += 1
-            already_aligned.append(
+            sat_dim = max(satisfied_dims, key=lambda d: positive[d]["weight"])
+            sat_hint = next((h for h in relevant_hints if h.dimension == sat_dim), best_hint)
+            already_aligned.append((
+                positive[sat_dim]["weight"],
+                s.order,
                 {
                     "settingId": s.id,
                     "label": s.exactLabel,
                     "path": s.canonicalPath,
+                    "category": s.category,
                     "currentDisplay": display_value(s, current),
-                }
-            )
+                    "dimension": sat_hint.dimension,
+                    "dimensionLabel": DIMENSION_LABELS.get(sat_hint.dimension, sat_hint.dimension),
+                    "why": sat_hint.why,
+                    "whatItDoes": s.description,
+                    "tradeoffs": s.riskOrTradeoffs,
+                },
+            ))
             continue
 
         conflicts = []
@@ -207,6 +262,22 @@ def build_coverage_audit(
                 best_score += w_other
         if best_score <= 0:
             cat_bucket["alreadyAligned"] += 1
+            already_aligned.append((
+                0.4,
+                s.order,
+                {
+                    "settingId": s.id,
+                    "label": s.exactLabel,
+                    "path": s.canonicalPath,
+                    "category": s.category,
+                    "currentDisplay": display_value(s, current),
+                    "dimension": best_hint.dimension,
+                    "dimensionLabel": DIMENSION_LABELS.get(best_hint.dimension, best_hint.dimension),
+                    "why": best_hint.why,
+                    "whatItDoes": s.description,
+                    "tradeoffs": s.riskOrTradeoffs,
+                },
+            ))
             continue
 
         reasons = weights[best_hint.dimension]["reasons"]
@@ -239,10 +310,20 @@ def build_coverage_audit(
         )
 
     candidates.sort(key=lambda c: (-c["score"], c["order"]))
+    already_aligned.sort(key=lambda t: (-t[0], t[1]))
+    aligned_list = [item for _, _, item in already_aligned]
+
+    if scope_plan.scope == "focused":
+        cap_aligned, cap_manual, cap_status = 3, 2, 2
+    elif scope_plan.scope == "category_optimization":
+        cap_aligned, cap_manual, cap_status = 6, 4, 4
+    else:
+        cap_aligned, cap_manual, cap_status = 12, 8, 6
+
     return {
         "evaluatedCount": evaluated_count,
         "eligibleCount": len(candidates),
-        "alreadyAlignedCount": len(already_aligned),
+        "alreadyAlignedCount": len(aligned_list),
         "alreadyStagedCount": len(already_staged),
         "lockedCount": len(locked_items),
         "unavailableCount": len(unavailable_items),
@@ -250,9 +331,9 @@ def build_coverage_audit(
         "notRelevantCount": not_relevant_count,
         "byCategory": by_category,
         "candidates": candidates,
-        "alreadyAlignedItems": already_aligned[:30],
+        "alreadyAlignedItems": aligned_list[:cap_aligned],
         "alreadyStagedItems": already_staged,
-        "lockedItems": locked_items,
-        "unavailableItems": unavailable_items[:15],
-        "manualConsiderations": manual_considerations[:15],
+        "lockedItems": locked_items[:cap_status],
+        "unavailableItems": unavailable_items[:cap_status],
+        "manualConsiderations": manual_considerations[:cap_manual],
     }

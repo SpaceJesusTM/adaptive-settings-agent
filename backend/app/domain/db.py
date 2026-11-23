@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -210,6 +210,32 @@ MIGRATIONS: dict[int, str] = {
         settings_json TEXT NOT NULL,
         is_active INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    """,
+    3: """
+    ALTER TABLE proposals ADD COLUMN restaged_from_batch_id TEXT;
+
+    CREATE TABLE IF NOT EXISTS personal_setup_facts (
+        id TEXT PRIMARY KEY,
+        fact_key TEXT NOT NULL,
+        label TEXT NOT NULL,
+        value_text TEXT NOT NULL,
+        origin_game TEXT,
+        source_setting_id TEXT,
+        source TEXT NOT NULL,
+        note TEXT,
+        active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS onboarding_state (
+        game TEXT PRIMARY KEY,
+        first_visited_at TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        completed_checks_json TEXT NOT NULL DEFAULT '[]',
+        dismissed_checks_json TEXT NOT NULL DEFAULT '[]',
         updated_at TEXT NOT NULL
     );
     """,

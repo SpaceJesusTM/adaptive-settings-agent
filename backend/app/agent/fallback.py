@@ -9,10 +9,19 @@ import re
 from typing import Any, Optional
 
 from ..catalog.schema import DIMENSION_LABELS
+from ..domain.cross_game import compare_cross_game
 from ..domain.planner import build_coverage_audit
 from ..domain.profile import ProfileService
 from ..domain.store import Store
-from .intent import classify, detect_dimensions, mentioned_setting_terms, preference_direction_for, preference_scope
+from .intent import (
+    classify,
+    detect_dimensions,
+    extract_sensitivity_number,
+    is_cross_game_query,
+    mentioned_setting_terms,
+    preference_direction_for,
+    preference_scope,
+)
 from .schemas import AssistantDraft, DraftExplanation, DraftPreference, DraftRecommendation
 from .scope import ScopePlan, classify_scope
 from .tools import ToolContext, search_settings
@@ -120,6 +129,63 @@ def fallback_turn(
             no_stage_scope,
             audit,
         )
+
+    if is_cross_game_query(message):
+        conn_cg = store.connect()
+        try:
+            cg = compare_cross_game(
+                store,
+                profile,
+                conn_cg,
+                query=message,
+                current_game=game,
+                source_sensitivity=extract_sensitivity_number(message),
+            )
+        finally:
+            conn_cg.close()
+        audit["crossGameComparisons"] = cg.get("comparisons", [])
+        # Pure comparison question without explicit "change/set up everything" request -> explain & navigate safely
+        asking_for_changes = scope_plan.scope in ("broad_optimization", "full_game_setup") and any(
+            k in lower for k in ("change", "configure", "set up", "recommend", "suggest")
+        )
+        if not asking_for_changes or cg.get("comparisons"):
+            comps = cg.get("comparisons", [])
+            if comps:
+                first = comps[0]
+                reply_parts = [f"{first['topic']} ({first['relationshipLabel']}): {first['summary']}"]
+                conv = first.get("sensitivityConversion")
+                if conv and conv.get("convertible"):
+                    reply_parts.append(
+                        f"360° starting point: {conv['formula']}. {conv['caveats'][0]}"
+                    )
+                elif conv:
+                    reply_parts.append(conv.get("reason", ""))
+                elif first.get("safetyNote"):
+                    reply_parts.append(first["safetyNote"])
+                if asking_for_changes and audit["candidates"]:
+                    # Combine cross-game comparison cards with priority-based safe recommendations
+                    pass
+                else:
+                    return (
+                        AssistantDraft(
+                            intent="explain",
+                            reply=" ".join(p for p in reply_parts if p)[:1600],
+                            navigate_to=first.get("targetNavigateId"),
+                            knowns_and_unknowns=first.get("differences"),
+                        ),
+                        no_stage_scope,
+                        audit,
+                    )
+            else:
+                return (
+                    AssistantDraft(
+                        intent="clarify",
+                        reply=cg.get("note", "No matching cross-game comparison found."),
+                        clarifying_question="Ask about push-to-talk, mouse sensitivity, abilities vs. grenades, movement keys, crosshairs, or V-Sync/Reflex/clarity.",
+                    ),
+                    no_stage_scope,
+                    audit,
+                )
 
     if intent == "explain":
         term = mentioned_setting_terms(message) or message

@@ -20,7 +20,7 @@ from .values import ValueError_, normalize_value
 ALL_TABLES = [
     "setting_values", "game_state", "change_events", "change_batches", "pins", "locks", "proposal_items",
     "proposals", "preferences", "evidence", "session_goals", "dismissals", "relevant_now", "context_events",
-    "chat_messages", "agent_runs", "valorant_crosshair_profiles", "kv",
+    "chat_messages", "agent_runs", "valorant_crosshair_profiles", "personal_setup_facts", "onboarding_state", "kv",
 ]
 AI_TABLES = ["proposal_items", "proposals", "relevant_now", "chat_messages", "agent_runs", "context_events",
              "session_goals", "dismissals"]
@@ -168,6 +168,13 @@ def reset(store: Store, scenario_dir: Path, backup_dir: Path, scenario_name: str
                         "VALUES (?,?,?,?,?,?,?,?,?)",
                         (new_id("ev"), e["kind"], e.get("dimension"), e.get("game"), e.get("settingId"), None,
                          e.get("detail"), None, e.get("createdAt", ts)))
+                for pf in scenario.get("personalFacts", []):
+                    conn.execute(
+                        "INSERT INTO personal_setup_facts(id, fact_key, label, value_text, origin_game, source_setting_id, "
+                        "source, note, active, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,1,?,?)",
+                        (new_id("fact"), pf["factKey"], pf["label"], pf["valueText"], pf.get("originGame"),
+                         pf.get("sourceSettingId"), pf.get("source", "seed"), pf.get("note"), ts, ts),
+                    )
                 for table, key in (("pins", "pins"), ("locks", "locks")):
                     for game, ids in scenario.get(key, {}).items():
                         for sid in ids:

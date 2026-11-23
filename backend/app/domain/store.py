@@ -35,6 +35,7 @@ SOURCE_LABELS = {
     "ai_applied": "AI proposed · user applied",
     "fallback_applied": "Fallback suggestion · user applied",
     "rule_applied": "Rule-based suggestion · user applied",
+    "history_applied": "Restaged from history · user applied",
     "undo": "Undo",
     "preset": "Video preset",
 }
@@ -378,31 +379,92 @@ class Store:
             raise NotFound(f"Unknown batch {batch_id}")
         game = b["game"]
         evs = conn.execute("SELECT * FROM change_events WHERE batch_id = ? ORDER BY rowid", (batch_id,)).fetchall()
-        current = {r["setting_id"]: r for r in conn.execute(
-            "SELECT setting_id, value_json, revision FROM setting_values WHERE game = ?", (game,))}
+        current_vals = self.values(conn, game)
+
+        prop_row = None
+        run_row = None
+        items_by_setting: dict[str, sqlite3.Row] = {}
+        if b["proposal_id"]:
+            prop_row = conn.execute("SELECT * FROM proposals WHERE id = ?", (b["proposal_id"],)).fetchone()
+            if prop_row is not None:
+                if prop_row["run_id"]:
+                    run_row = conn.execute(
+                        "SELECT id, mode, model, goal_excerpt FROM agent_runs WHERE id = ?",
+                        (prop_row["run_id"],),
+                    ).fetchone()
+                for pit in conn.execute(
+                    "SELECT * FROM proposal_items WHERE proposal_id = ? ORDER BY position",
+                    (b["proposal_id"],),
+                ):
+                    items_by_setting[pit["setting_id"]] = pit
+
         events = []
         undoable = not b["undone_by_batch_id"] and b["source"] != "reset"
+        superseded_count = 0
         for e in evs:
             s = self.registry.setting(game, e["setting_id"])
             old, new = loads(e["old_value_json"]), loads(e["new_value_json"])
-            cur = current.get(e["setting_id"])
+            cur = current_vals.get(e["setting_id"])
+            cur_val = cur["value"] if cur is not None else None
             still_current = cur is not None and int(cur["revision"]) == int(e["revision_after"])
+            if not still_current and not b["undone_by_batch_id"]:
+                superseded_count += 1
             undoable = undoable and still_current
+            pit = items_by_setting.get(e["setting_id"])
             events.append({
-                "eventId": e["id"], "settingId": e["setting_id"],
+                "eventId": e["id"],
+                "settingId": e["setting_id"],
                 "label": s.exactLabel if s else e["setting_id"],
                 "path": s.canonicalPath if s else e["setting_id"],
-                "oldValue": old, "newValue": new,
+                "oldValue": old,
+                "newValue": new,
                 "oldDisplay": display_value(s, old) if s else str(old),
                 "newDisplay": display_value(s, new) if s else str(new),
-                "revisionAfter": e["revision_after"], "stillCurrent": still_current,
+                "currentValue": cur_val,
+                "currentDisplay": display_value(s, cur_val) if (s and cur is not None) else None,
+                "revisionAfter": e["revision_after"],
+                "stillCurrent": still_current,
+                "why": pit["why"] if pit and pit["why"] else None,
+                "tradeoff": pit["tradeoff"] if pit and pit["tradeoff"] else None,
+                "basedOn": pit["based_on"] if pit and pit["based_on"] else None,
+                "wasEditedByUser": bool(pit["edited_value_json"] is not None) if pit else False,
             })
+
+        prop_keys = set(prop_row.keys()) if prop_row is not None else set()
+        plan_obj = loads(prop_row["plan_json"], None) if (prop_row is not None and "plan_json" in prop_keys) else None
+        provenance = {
+            "hasRecordedRationale": bool(
+                prop_row is not None
+                and (
+                    (run_row is not None and bool(run_row["goal_excerpt"]))
+                    or any(ev.get("why") or ev.get("basedOn") for ev in events)
+                    or ("restaged_from_batch_id" in prop_keys and bool(prop_row["restaged_from_batch_id"]))
+                )
+            ),
+            "userRequest": run_row["goal_excerpt"] if run_row else None,
+            "runId": prop_row["run_id"] if prop_row else None,
+            "model": run_row["model"] if (run_row and run_row["mode"] == "ai") else None,
+            "proposalTitle": prop_row["title"] if prop_row else None,
+            "restagedFromBatchId": prop_row["restaged_from_batch_id"] if "restaged_from_batch_id" in prop_keys else None,
+            "planReason": plan_obj.get("reason") if isinstance(plan_obj, dict) else None,
+        }
         return {
-            "batchId": b["id"], "game": game, "source": b["source"],
-            "sourceLabel": SOURCE_LABELS.get(b["source"], b["source"]), "label": b["label"],
-            "proposalId": b["proposal_id"], "condition": b["condition"], "createdAt": b["created_at"],
-            "undoesBatchId": b["undoes_batch_id"], "undoneByBatchId": b["undone_by_batch_id"],
-            "undoable": undoable, "events": events, "gameRevision": self.game_revision(conn, game),
+            "batchId": b["id"],
+            "game": game,
+            "source": b["source"],
+            "sourceLabel": SOURCE_LABELS.get(b["source"], b["source"]),
+            "label": b["label"],
+            "proposalId": b["proposal_id"],
+            "condition": b["condition"],
+            "createdAt": b["created_at"],
+            "undoesBatchId": b["undoes_batch_id"],
+            "undoneByBatchId": b["undone_by_batch_id"],
+            "undoable": undoable,
+            "superseded": bool(not b["undone_by_batch_id"] and superseded_count > 0),
+            "supersededCount": superseded_count,
+            "provenance": provenance,
+            "events": events,
+            "gameRevision": self.game_revision(conn, game),
             "values": {e["settingId"]: {"value": e["newValue"], "revision": e["revisionAfter"]} for e in events},
         }
 
