@@ -1,6 +1,6 @@
 # Participant Pilot Study Protocol (CSC2524)
 
-**Status:** Protocol ready for formative piloting; **zero human participant sessions have been conducted** as of 2026-11-22. No human timings, comprehension scores, usability ratings, or preference outcomes exist yet.
+**Status:** Protocol ready for formative piloting; **zero human participant sessions have been conducted** as of 2026-11-23. No human timings, comprehension scores, usability ratings, or preference outcomes exist yet.
 
 ## 1. Purpose & Research Questions
 
@@ -31,9 +31,12 @@ To prevent item memorization across Condition A (Baseline) and Condition B (Adap
 ### 2.2 Condition Parity & Disclosed Game-Menu Asymmetry Confounds
 * **Prototype-level parity (preserved by code & tests):** Both A and B share identical setting IDs, canonical tab/section locations, row order, prototype search, CS2 explicit Video Apply/Discard semantics, VALORANT 15-profile Crosshair editor, CS2 HUD Edge Positions (`Done` immediate save), manual change validation, and atomic `Undo`.
 * **Disclosed Adaptive Intervention:** Condition B adds chat guidance, auto-staged `Changes`, `Pinned` direct manual editing (and AI locks), and `Discover` (inside docked/detached Adaptive Workspace). Keep **Experimenter** toggled **OFF** (`Participant` mode) throughout participant tasks so condition tags (`A · Static baseline` / `B · Adaptive`), `Study controls`, `Trace`, and raw model IDs stay hidden.
-* **Known Game-Level Confound (Must Analyze Across Counterbalanced Cells):**
-  1. **Catalogue size & documentation texture:** VALORANT has `177` rows (`59` AI-proposable, immediate saves, Crosshair profiles, `93` secondary-only items with † badges), whereas CS2 has `138` game-file-verified rows (`93` AI-proposable, deferred explicit `Apply Changes` on Video settings, `HUD Edge Positions`, and `New` tab).
-  2. **Task difficulty calibration:** Pairing `fresh_install_comprehensive` across both games keeps the number of actionable high- and medium-impact performance/clarity targets roughly comparable (`>= 12` meaningful changes across Video, Audio, and General/Game), while G1–G4 counterbalancing statistically separates Game differences from A/B condition differences in larger samples. In N=1–3 pilots, note game-specific friction (especially CS2 explicit `Apply Changes` vs immediate save) explicitly rather than averaging over it.
+* **Known Game-Level & Experimental Confounds (Confound Analysis):**
+  1. **Catalogue size & documentation texture asymmetry:** VALORANT has `177` rows (`59` AI-proposable, immediate saves, Crosshair profiles, `93` secondary-only items with † badges, `43` `rangeVerified: false` sliders), whereas CS2 has `138` game-file-verified rows (`93` AI-proposable, deferred explicit `Apply Changes` on Video settings, `HUD Edge Positions`, and `New` tab).
+  2. **Save-model asymmetry (immediate vs deferred Video draft):** CS2 Video edits stage locally inside the CS2 panel until `Apply Changes`, whereas VALORANT saves immediately. Without `Pinned` conflict prompts and explicit debrief notes, CS2 friction can be misattributed to Condition A vs B rather than game-menu fidelity.
+  3. **Local-model latency asymmetry (`18–36 s` narrow vs `~136–151 s` full-setup):** Condition B includes local `gemma4:12b-it-q4_K_M` thinking time that Condition A does not have; facilitators must compare comprehension/outcome quality separately from raw elapsed wall-clock latency (or compare latency explicitly as an ecological cost of privacy-preserving local inference).
+  4. **Simulated consequence absence:** Without live in-game FPS drops, visual tearing, or competitive match pressure, participants face lower stakes than in real play; rubber-stamping rates observed in simulation may underestimate or overestimate real-world caution.
+  5. **Task difficulty & statistical power boundary:** Pairing `fresh_install_comprehensive` across both games keeps actionable targets comparable (`>= 12`), and G1–G4 counterbalancing isolates Condition from Game in multi-participant studies, while N=1–3 formative walkthroughs must only surface qualitative usability friction and probe reactions—never Condition A vs B causal claims.
 
 ---
 
@@ -55,9 +58,16 @@ Seed every main block from `fresh_install_comprehensive` via **Experimenter → 
 * **Condition Parity Check (end of Block 1 & Block 2):** Ask participant to locate and **Undo** one recent setting batch they decide wasn't worth the trade-off.
 * **Block 3 Cross-Game Add-on (after primary blocks, Condition B only):** Switch to `valorant_history_new_cs2` in CS2 -> inspect **Workspace → Discover** cards referencing VALORANT priorities -> dismiss one card with a reason -> click **Prepare for review** on another -> test pinning one setting in **Workspace → Pinned** (and optionally opening `?view=workspace`).
 
+### 3.4 Demonstrations A, B, and C (Final HCI Pass Scenarios)
+
+When running a live system walkthrough or formative pilot across all adaptive mechanisms added in the final pass:
+* **Demonstration A — Cross-Game Onboarding, `My Priorities` & Sensitivity/Keybind Helper:** Load `valorant_onboarding_to_cs2` in CS2 (`adaptive`). Inspect **My Priorities** (Section 1 Goal, Section 2 durable priorities saved from VALORANT, Section 3 confirmed personal facts `0.35` aim sens, `V` Push-to-Talk, `Z` ping). Open **Discover** to inspect `Getting started in CS2` non-mutating `Manual review` cards and verify clicking **Mark checked** persists cleanly without mutating CS2 settings. Ask in Chat: *"What is the CS2 equivalent of VALORANT push-to-talk and what is 0.35 VALORANT sensitivity in CS2?"* and verify the grounded comparison card reports CS2 `Use Microphone` + `≈ 1.11` hipfire conversion with explicit FOV/ADS caveats.
+* **Demonstration B — Ongoing Context & Companion Follow-Up Adaptation:** From `default` in VALORANT (`adaptive`), toggle `VSync` manually to `Off`, refresh **Discover**, and confirm the companion rule surfaces `NVIDIA Reflex Low Latency` (`Something worth checking after your recent change`) without auto-applying it. Optionally trigger `frame_drops` in Experimenter **Study controls** to inspect simulated event grouping (`Responding to a simulated event`).
+* **Demonstration C — Restraint on Already-Aligned Setups, History Provenance & Exclusive Pop-Out:** Load `well_configured_competitive` (`valorant`, `adaptive`), ask for maximum competitive FPS and clarity, and verify **0** forced edits alongside **Already aligned** and **Needs your decision** disclosure lists. Switch to a modified state, apply one suggestion and one manual edit, open **History** to inspect `Original request`, expandable `Why suggested & trade-offs`, live `(now ...)` state, honest missing provenance on manual edits, and non-silent **Review & restage**. Finally click **Pop out ↗** (`/?view=workspace`), confirm main docked Assistant/Workspace relocate exclusively behind `Workspace popped out`, and click **Dock here** (or close the detached window) to verify reload-free restoration.
+
 ---
 
-## 4. Independent Understanding, Rubber-Stamping & Latency Rules
+## 4. Independent Understanding, Rubber-Stamping, Observation Probes & Latency Rules
 
 ### 4.1 Independent Setting Comprehension (Closed-Book)
 Following **Ingesson & Riveiro (DIS 2026)**, passive access to collapsible explanations in chat does **not** prove comprehension. Immediately after Task 2 ends in *each* condition:
@@ -79,8 +89,19 @@ Because comprehensive setups can stage 12–25+ items across categories, record 
 
 ### 4.3 Local Model Latency & Fallback Contamination Rule
 * **Warm-up before timing:** Before the participant begins Condition B, send one quick warmup turn while setting up (`ollama` keeps weights resident for `keep_alive="15m"`), then run **Study controls → Reset AI session only** so cold weight load (~10–20 s) does not skew Task 1.
-* **Expected Mac (`arm64`, M4 24 GB) timing:** After prompt/batch optimization, expect ~`18.6–31.9 s` for narrow/explain/focused/follow-up turns, ~`74.5 s` for 12-item category plans, and ~`136.0 s` for full multi-category CS2 setup with `gemma4:12b-it-q4_K_M` (cold load adds ~6–20 s). Tell participants: *"The local assistant runs on this laptop rather than a cloud server, so full-menu reviews take a minute or two—nothing changes while it thinks."* Use a desktop GPU host if sub-10 s full-setup pacing is needed.
+* **Expected Mac (`arm64`, M4 24 GB) timing:** After prompt/batch optimization, expect ~`18.6–35.8 s` for narrow/explain/focused/cross-game turns, ~`74.5 s` for 12-item category plans, and ~`136.0–151.0 s` for full multi-category CS2 setup with `gemma4:12b-it-q4_K_M` (cold load adds ~6–20 s). Tell participants: *"The local assistant runs on this laptop rather than a cloud server, so full-menu reviews take a minute or two—nothing changes while it thinks."* Use a desktop GPU host if sub-10 s full-setup pacing is needed.
 * **Strict Fallback Exclusion Rule:** Check the `Trace` tab after every session. If **any** Condition B turn fell back to deterministic rules (`source == "fallback"` / `Assistant offline — using basic suggestions`), flag that trial as `fallback_contaminated` in the study sheet and **exclude it from primary Local-AI condition averages** (report it cleanly in a separate reliability note).
+
+### 4.4 Formative Observation Probes (8 Targeted Checks)
+During pilot walkthroughs and debriefs, capture verbal reactions to these eight probes:
+1. **Goal vs. Priority vs. Fact mental model (`My Priorities`):** Does the participant correctly distinguish a temporary session goal from a lasting cross-game priority and a non-auto-applied personal fact?
+2. **Goal-vs-priority conflict notices:** When a session goal conflicts with a saved priority (`Priority trade-off:`), do they notice the warning banner and articulate why settings leaned toward the current goal?
+3. **Already-aligned & Needs-your-decision restraint:** On `well_configured_competitive`, do `Already aligned` and `Needs your decision` reassure them that settings were checked (vs thinking the assistant failed to optimize anything)?
+4. **Cross-game 360° hipfire caveats:** After viewing `0.35 → 1.11`, do they explain *why* ADS zoom and FOV still feel different rather than treating it as an exact 1:1 port?
+5. **History provenance vs. manual edit honesty:** When opening **History**, do they notice why AI batches show `Original request` + trade-offs whereas manual edits state no assistant rationale was recorded?
+6. **Review & restage safety expectation:** Do they recognize that clicking **Review & restage** creates an editable draft in `Changes` rather than immediately overwriting live settings?
+7. **Discover inspect-only & hold rule:** On `valorant_onboarding_to_cs2`, do they understand why **Mark checked** never changes game settings automatically and why cards wait for `Refresh` while inspecting?
+8. **Exclusive pop-out ergonomics:** When popping out `/?view=workspace`, does hiding the docked panel reduce clutter or cause disorientation when switching between windows and docking back (`Dock here`)?
 
 ---
 
