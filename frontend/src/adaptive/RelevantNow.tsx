@@ -1,17 +1,18 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { GameId, RelevantCard } from "../api/types";
 import { gameName } from "../lib/format";
 import { EMPTY, useAppStore } from "../store/useAppStore";
 import { RecommendationCard, type CardModel } from "./RecommendationCard";
 
 function toCard(c: RelevantCard, experimenterMode: boolean): CardModel {
+  const originMap: Record<string, string> = {
+    goal_hint: "Catalog goal hint",
+    followup_rule: "Companion check",
+    onboarding_observation: "Observed setup",
+  };
   const originText = experimenterMode
-    ? c.whyBasis === "official"
-      ? "rule-based; official game documentation"
-      : "rule-based; editorial match"
-    : c.kind === "inspect"
-      ? "optional setup check based on your profile"
-      : "suggestion grounded in game documentation";
+    ? `${originMap[c.whyOrigin ?? ""] ?? "rule-based"}; ${c.whyBasis === "official" ? "official documentation" : "editorial match"}`
+    : originMap[c.whyOrigin ?? ""] ?? (c.kind === "inspect" ? "Observed setup" : "Suggestion grounded in game docs");
   return {
     key: c.cardId,
     kind: c.kind ?? "change",
@@ -58,11 +59,33 @@ export function RelevantNow({ game }: { game: GameId }) {
   const experimenterMode = useAppStore((s) => s.experimenterMode);
   const pins = useAppStore((s) => s.states[game]?.pins ?? EMPTY);
   const triggerContext = useAppStore((s) => s.triggerContext);
+  const markDiscoverSeen = useAppStore((s) => s.markDiscoverSeen);
   const [dismissing, setDismissing] = useState<string | null>(null);
   const items = rn?.items ?? [];
   const anyOpen = items.some((c) => openCards[c.cardId]);
+  const activeCount = items.filter((c) => c.state === "suggested" || c.state === "changed").length;
 
-  const groups = GROUP_ORDER.map((g) => ({
+  useEffect(() => {
+    if (items.length > 0) {
+      markDiscoverSeen(game);
+    }
+  }, [game, items, markDiscoverSeen]);
+
+  const hasConfirmedOrDeliberateOb = items.some(
+    (c) =>
+      (c.triggerGroup ?? "goal_or_preference") === "onboarding" &&
+      (c.basedOn?.some((b) => /remembered|confirmed|manual|edit/i.test(b)) ?? false),
+  );
+  const effectiveOrder = hasConfirmedOrDeliberateOb
+    ? GROUP_ORDER
+    : [
+        GROUP_ORDER[0],
+        GROUP_ORDER[1],
+        GROUP_ORDER[3],
+        GROUP_ORDER[2],
+      ];
+
+  const groups = effectiveOrder.map((g) => ({
     ...g,
     title: g.label(game),
     cards: items.filter((c) => (c.triggerGroup ?? "goal_or_preference") === g.key),
@@ -73,7 +96,7 @@ export function RelevantNow({ game }: { game: GameId }) {
       <header className="rn-head">
         <div className="rn-head-top">
           <span className="rn-title">
-            Discover <span className="rn-count">{items.filter((c) => c.state === "suggested").length}</span>
+            Discover <span className="rn-count">{activeCount}</span>
           </span>
           {rn?.canRevisitOnboarding ? (
             <button type="button" className="link rn-revisit" onClick={() => void revisitOnboarding(game)}>
@@ -131,7 +154,7 @@ export function RelevantNow({ game }: { game: GameId }) {
                     onToggle={(o) => setCardOpen(c.cardId, o)}
                     onShow={() => requestFocus(game, c.settingId)}
                     onStage={c.kind === "inspect" ? undefined : () => void stage(game, [c], "rules", null, `Discover: ${c.label}`)}
-                    onMarkChecked={c.kind === "inspect" || c.checkId ? () => void markChecked(game, c.checkId ?? c.cardId) : undefined}
+                    onMarkChecked={c.kind === "inspect" || c.checkId ? () => void markChecked(game, c.checkId ?? c.ruleId ?? c.cardId) : undefined}
                     onDismiss={() => setDismissing(c.cardId)}
                     extraActions={
                       <button type="button" className="btn btn-small btn-ghost" onClick={() => void togglePin(game, c.settingId)}>

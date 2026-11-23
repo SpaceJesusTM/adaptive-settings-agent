@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ChatMessage, GameId, PreferenceSuggestion, ScopeOverride } from "../api/types";
+import { gameName } from "../lib/format";
 import { EMPTY, useAppStore } from "../store/useAppStore";
 
 const STARTERS: Record<GameId, string[]> = {
@@ -105,11 +106,14 @@ function AssistantMessage({ game, msg }: { game: GameId; msg: ChatMessage }) {
   const res = msg.response!;
   const experimenterMode = useAppStore((s) => s.experimenterMode);
   const requestFocus = useAppStore((s) => s.requestFocusInMainWindow);
+  const navigateCrossGame = useAppStore((s) => s.navigateCrossGame);
+  const undoMemoryUpdate = useAppStore((s) => s.undoMemoryUpdate);
   const openWorkspace = useAppStore((s) => s.openWorkspace);
   const stage = useAppStore((s) => s.stage);
   const proposals = useAppStore((s) => s.proposals[game] ?? EMPTY);
   const [showChecked, setShowChecked] = useState(false);
   const [showFiltered, setShowFiltered] = useState(false);
+  const [undoneMemoryIds, setUndoneMemoryIds] = useState<Record<string, boolean>>({});
 
   const ai = res.provenance.source === "ai";
   const linkedProposal = res.stagedProposalId ? proposals.find((p) => p.id === res.stagedProposalId) : undefined;
@@ -216,6 +220,11 @@ function AssistantMessage({ game, msg }: { game: GameId; msg: ChatMessage }) {
               <p>
                 Evaluated {cov.evaluatedCount} catalogue settings: <strong>{cov.proposedCount}</strong> prepared,{" "}
                 <strong>{cov.alreadyAlignedCount}</strong> already aligned,{" "}
+                {(cov.tradeoffRetainedCount ?? res.plan?.tradeoffRetainedItems?.length ?? 0) > 0 ? (
+                  <>
+                    <strong>{cov.tradeoffRetainedCount ?? res.plan?.tradeoffRetainedItems?.length}</strong> retained due to trade-off,{" "}
+                  </>
+                ) : null}
                 <strong>{cov.lockedCount}</strong> locked, <strong>{cov.manualCount}</strong> manual/personal excluded.
               </p>
               <ul className="msg-checked-list">
@@ -240,7 +249,9 @@ function AssistantMessage({ game, msg }: { game: GameId; msg: ChatMessage }) {
       {res.recommendations.length === 0 &&
       res.plan &&
       (res.intent === "recommend" || res.plan.singleSettingHint) &&
-      ((res.plan.alreadyAlignedItems?.length ?? 0) > 0 || (res.plan.manualConsiderations?.length ?? 0) > 0) ? (
+      ((res.plan.alreadyAlignedItems?.length ?? 0) > 0 ||
+        (res.plan.tradeoffRetainedItems?.length ?? 0) > 0 ||
+        (res.plan.manualConsiderations?.length ?? 0) > 0) ? (
         <div className="msg-aligned-box" aria-label="Configuration review">
           <strong className="layer-label">No changes needed to apply</strong>
           {res.plan.alreadyAlignedItems?.length ? (
@@ -257,6 +268,24 @@ function AssistantMessage({ game, msg }: { game: GameId; msg: ChatMessage }) {
                 </li>
               ))}
             </ul>
+          ) : null}
+          {res.plan.tradeoffRetainedItems?.length ? (
+            <div className="review-tradeoff-block">
+              <span className="layer-label">Retained due to trade-off</span>
+              <ul className="review-info-list">
+                {res.plan.tradeoffRetainedItems.slice(0, 4).map((t) => (
+                  <li key={t.settingId} className="review-info-item">
+                    <div>
+                      <strong>{t.label}</strong> <span className="chip chip-warn">Kept {t.currentDisplay}</span>
+                      <span className="review-info-why"> — {t.reason}</span>
+                    </div>
+                    <button type="button" className="link" onClick={() => requestFocus(game, t.settingId)}>
+                      Show in settings
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
           ) : null}
           {res.plan.manualConsiderations?.length ? (
             <ul className="review-info-list">
@@ -282,8 +311,23 @@ function AssistantMessage({ game, msg }: { game: GameId; msg: ChatMessage }) {
             <div key={c.id} className="cg-card">
               <div className="cg-head">
                 <strong>{c.topic}</strong>
+                {c.sourceGame && c.targetGame ? (
+                  <span className="chip cg-dir-chip">
+                    {c.sourceGame.toUpperCase()} → {c.targetGame.toUpperCase()}
+                  </span>
+                ) : null}
                 <span className="chip">{c.relationshipLabel}</span>
               </div>
+              {c.sourceEvidenceLabel ? (
+                <p className="cg-source-ev">
+                  <strong>Source value used:</strong> {c.sourceEvidenceLabel}
+                </p>
+              ) : null}
+              {c.discrepancyNote ? (
+                <p className="cg-discrepancy" role="alert">
+                  <strong>Value mismatch noticed:</strong> {c.discrepancyNote}
+                </p>
+              ) : null}
               <p className="cg-summary">{c.summary}</p>
               <div className="cg-cols">
                 {c.valorantSettings.length ? (
@@ -330,8 +374,14 @@ function AssistantMessage({ game, msg }: { game: GameId; msg: ChatMessage }) {
               <p className="cg-diff">{c.differences}</p>
               <p className="cg-safety">{c.safetyNote}</p>
               {c.targetNavigateId ? (
-                <button type="button" className="btn btn-small" onClick={() => requestFocus(game, c.targetNavigateId!)}>
-                  Show in settings
+                <button
+                  type="button"
+                  className="btn btn-small"
+                  onClick={() => void navigateCrossGame(c.targetNavigateGame ?? game, c.targetNavigateId!)}
+                >
+                  {c.targetNavigateGame && c.targetNavigateGame !== game
+                    ? `Show in ${gameName(c.targetNavigateGame)} settings`
+                    : "Show in settings"}
                 </button>
               ) : null}
             </div>
@@ -378,6 +428,39 @@ function AssistantMessage({ game, msg }: { game: GameId; msg: ChatMessage }) {
       {res.preferenceSuggestions.map((p) => (
         <PreferenceChip key={`${p.dimension}-${p.scope}`} s={p} />
       ))}
+
+      {res.appliedMemoryUpdates?.length ? (
+        <div className="msg-memory-list" aria-label="Saved to System Understanding">
+          {res.appliedMemoryUpdates.map((m) => {
+            const isUndone = Boolean(undoneMemoryIds[m.id]);
+            return (
+              <div key={m.id} className={`msg-memory-pill ${isUndone ? "is-undone" : ""}`}>
+                <span>
+                  {isUndone ? (
+                    <>Removed from System Understanding: {m.label}</>
+                  ) : (
+                    <>
+                      <strong>Saved to System Understanding:</strong> {m.label}
+                    </>
+                  )}
+                </span>
+                {!isUndone ? (
+                  <button
+                    type="button"
+                    className="btn btn-small btn-ghost"
+                    onClick={() => {
+                      setUndoneMemoryIds((prev) => ({ ...prev, [m.id]: true }));
+                      void undoMemoryUpdate(m);
+                    }}
+                  >
+                    Undo
+                  </button>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
 
       {experimenterMode && res.filtered.length ? (
         <div className="msg-filtered">

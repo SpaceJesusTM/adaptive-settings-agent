@@ -7,13 +7,12 @@ import { Chat } from "./Chat";
 
 export function PreferencesPanel({ game }: { game: GameId }) {
   const profile = useAppStore((s) => s.profile);
-  const byId = useAppStore((s) => s.byId[game]);
-  const displayValues = useAppStore((s) => s.displayValues);
   const removePreference = useAppStore((s) => s.removePreference);
   const clearGoals = useAppStore((s) => s.clearGoals);
   const addPreference = useAppStore((s) => s.addPreference);
   const addPersonalFact = useAppStore((s) => s.addPersonalFact);
   const removePersonalFact = useAppStore((s) => s.removePersonalFact);
+  const goToSetting = useAppStore((s) => s.requestFocusInMainWindow);
   const [dim, setDim] = useState("input_latency");
   const [dir, setDir] = useState<"prioritize" | "deprioritize">("prioritize");
   const [scope, setScope] = useState<"session" | "durable">("durable");
@@ -26,31 +25,50 @@ export function PreferencesPanel({ game }: { game: GameId }) {
   const session = profile.preferences.filter((p) => p.scope === "session");
   const facts = profile.personalFacts ?? [];
   const factTypes = profile.personalFactTypes ?? [];
-  const curVals = displayValues(game);
+  const observed = profile.observed;
+  const keySettings = observed?.keySettings ?? [];
+  const discrepancies = observed?.discrepancies ?? [];
+  const tentativeSignals = observed?.tentativeSignals ?? [];
+  const recentActions = observed?.recentActions ?? [];
 
-  const quickCaptures: { factKey: string; label: string; settingId: string }[] =
-    game === "valorant"
-      ? [
-          { factKey: "mouse_sensitivity", label: "Remember Sensitivity", settingId: "val.general.sensitivity_aim" },
-          { factKey: "push_to_talk_key", label: "Remember Push-to-Talk key", settingId: "val.controls.key_team_ptt" },
-          { factKey: "ping_key", label: "Remember Ping key", settingId: "val.controls.key_ping" },
-        ]
-      : [
-          { factKey: "mouse_sensitivity", label: "Remember Sensitivity", settingId: "cs2.kbmouse.mouse_sensitivity" },
-          { factKey: "push_to_talk_key", label: "Remember Mic key", settingId: "cs2.kbmouse.key_mic" },
-          { factKey: "ping_key", label: "Remember Ping key", settingId: "cs2.kbmouse.key_player_ping" },
-        ];
+  const sourceCategoryLabel = (cat?: string) => {
+    switch (cat) {
+      case "explicit_statement":
+        return "explicitly stated";
+      case "manual_change":
+        return "manual edit";
+      case "ai_applied":
+        return "applied suggestion";
+      case "scenario_seed":
+        return "scenario preset";
+      case "rejected_or_dismissed":
+        return "dismissed";
+      case "user_checked":
+        return "checked";
+      default:
+        return "observed";
+    }
+  };
 
   return (
-    <div className="prefs">
-      <section aria-label="Current session goal">
-        <h4>1. Current goal · {gameName(game)} (this session)</h4>
-        <p className="muted">Guides immediate suggestions right now; cleared when you start a new session or click Clear.</p>
-        {goals.length === 0 ? <p className="muted">No active goal yet. Tell the assistant what you want in chat.</p> : null}
+    <div className="prefs su-panel" aria-label="System Understanding">
+      <div className="su-intro">
+        <strong>System Understanding</strong>
+        <small>What guides suggestions automatically — without needing manual setup first.</small>
+      </div>
+
+      <section aria-label="Current goal">
+        <h4>Current goal · {gameName(game)}</h4>
+        <p className="muted">Derived automatically from what you ask in chat for this session.</p>
+        {goals.length === 0 ? (
+          <p className="muted">
+            No active session goal yet. Mention a goal in Chat (e.g. smoother FPS or clearer visibility) and I&apos;ll adapt automatically.
+          </p>
+        ) : null}
         {goals.map((g) => (
           <div key={g.id} className="goal-chip">
             <span>“{g.text}”</span>
-            <small>Interpreted focus: {g.dimensions.map((d) => profile.dimensions.find((x) => x.id === d)?.label ?? d).join(", ")}</small>
+            <small>Focus: {g.dimensions.map((d) => profile.dimensions.find((x) => x.id === d)?.label ?? d).join(", ")}</small>
           </div>
         ))}
         {conflicts.map((c, idx) => (
@@ -65,9 +83,74 @@ export function PreferencesPanel({ game }: { game: GameId }) {
         ) : null}
       </section>
 
-      <section aria-label="General priorities">
-        <h4>2. General priorities (this session &amp; lasting)</h4>
-        <p className="muted">Confirmed weights that rank suggestions across chats. Lasting priorities carry across VALORANT and CS2.</p>
+      <section aria-label="What I have noticed">
+        <h4>What I&apos;ve noticed automatically</h4>
+        <p className="muted">Live observations from your simulated menus — never treats defaults or presets as personal intent.</p>
+        {discrepancies.length ? (
+          <div className="su-discrepancy-list" role="alert">
+            {discrepancies.map((d) => (
+              <div key={d.factId} className="su-discrepancy">
+                <strong>Notice mismatch ({gameName(d.game)})</strong>
+                <p>{d.explanation}</p>
+                <div className="su-discrepancy-actions">
+                  <button type="button" className="link" onClick={() => goToSetting(d.game, d.settingId)}>
+                    Show live setting
+                  </button>
+                  <button type="button" className="link" onClick={() => void removePersonalFact(d.factId)}>
+                    Remove outdated note
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {tentativeSignals.length ? (
+          <div className="su-tentative-list">
+            {tentativeSignals.map((sig) => (
+              <div key={sig.dimension} className="su-tentative">
+                <span className="chip chip-tentative">Tentative — not saved</span>
+                <p>{sig.explanation}</p>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {keySettings.length ? (
+          <div className="su-observed-list">
+            {keySettings.map((k) => (
+              <div key={`${k.game}-${k.settingId}`} className="pref-item su-obs-item">
+                <div>
+                  <span className="su-obs-head">
+                    <strong>{k.label}</strong> ({gameName(k.game)}): <code>{k.display}</code>
+                  </span>
+                  <small className="pref-origin">
+                    <span className={`chip ${k.deliberate ? "chip-deliberate" : "chip-observed"}`}>{k.sourceLabel}</span>
+                  </small>
+                </div>
+                <button type="button" className="link" onClick={() => goToSetting(k.game, k.settingId)}>
+                  show
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {recentActions.length ? (
+          <details className="su-recent-details">
+            <summary>Recent session activity ({recentActions.length})</summary>
+            <ul className="evidence">
+              {recentActions.map((a) => (
+                <li key={a.batchId}>{a.summary} · {timeAgo(a.createdAt)}</li>
+              ))}
+            </ul>
+          </details>
+        ) : null}
+      </section>
+
+      <section aria-label="What you asked me to remember">
+        <h4>What you&apos;ve asked me to remember</h4>
+        <p className="muted">Confirmed priorities &amp; personal notes (saved via Chat or manual controls below).</p>
+        {session.length === 0 && durable.length === 0 && facts.length === 0 ? (
+          <p className="muted">Nothing explicitly saved yet. You can tell me in Chat anytime (e.g. &ldquo;Remember I prefer V for push-to-talk&rdquo;).</p>
+        ) : null}
         {session.map((p) => (
           <div key={p.id} className="pref-item">
             <div>
@@ -81,7 +164,6 @@ export function PreferencesPanel({ game }: { game: GameId }) {
             </button>
           </div>
         ))}
-        {durable.length === 0 && session.length === 0 ? <p className="muted">No saved priorities yet.</p> : null}
         {durable.map((p) => (
           <div key={p.id} className="pref-item">
             <div>
@@ -89,12 +171,22 @@ export function PreferencesPanel({ game }: { game: GameId }) {
                 {p.direction === "prioritize" ? "▲" : "▼"} {p.dimensionLabel}
               </span>
               <small className="pref-origin">
-                Lasting across games{p.originGame ? ` · saved in ${gameName(p.originGame)}` : ""} · {p.source === "user_explicit" ? "added by you" : p.source === "chat_confirmed" ? "confirmed in chat" : "profile"} · {timeAgo(p.createdAt)}
+                Lasting across games{p.originGame ? ` · ${gameName(p.originGame)}` : ""} ·{" "}
+                {p.source === "chat_explicit"
+                  ? "remembered from chat"
+                  : p.source === "chat_confirmed"
+                    ? "confirmed in chat"
+                    : p.source === "user_explicit"
+                      ? "added manually"
+                      : "profile"}{" "}
+                · {timeAgo(p.createdAt)}
               </small>
               {p.evidence.length ? (
                 <ul className="evidence">
                   {p.evidence.slice(0, 3).map((e, i) => (
-                    <li key={i}>{e.detail}</li>
+                    <li key={i}>
+                      <span className="ev-cat">[{sourceCategoryLabel(e.sourceCategory)}]</span> {e.detail}
+                    </li>
                   ))}
                 </ul>
               ) : null}
@@ -104,39 +196,17 @@ export function PreferencesPanel({ game }: { game: GameId }) {
             </button>
           </div>
         ))}
-        <div className="pref-row" style={{ marginTop: 8 }}>
-          <select value={dir} onChange={(e) => setDir(e.target.value as "prioritize" | "deprioritize")} aria-label="Direction">
-            <option value="prioritize">Prioritize</option>
-            <option value="deprioritize">De-prioritize</option>
-          </select>
-          <select value={dim} onChange={(e) => setDim(e.target.value)} aria-label="Goal">
-            {profile.dimensions.map((d) => (
-              <option key={d.id} value={d.id}>
-                {d.label}
-              </option>
-            ))}
-          </select>
-          <select value={scope} onChange={(e) => setScope(e.target.value as "session" | "durable")} aria-label="Scope">
-            <option value="durable">lasting</option>
-            <option value="session">this session</option>
-          </select>
-          <button type="button" className="btn btn-small" onClick={() => void addPreference(game, dim, dir, scope)}>
-            Save priority
-          </button>
-        </div>
-      </section>
-
-      <section aria-label="Personal setup preferences">
-        <h4>3. Personal setup facts (only when confirmed)</h4>
-        <p className="muted">Optional habits like Push-to-Talk key or sensitivity. Used to help orient you in another game — never auto-applied.</p>
-        {facts.length === 0 ? <p className="muted">None confirmed yet.</p> : null}
         {facts.map((f) => (
           <div key={f.id} className="pref-item">
             <div>
               <strong>{f.label}:</strong> <code>{f.valueText}</code>
               <small className="pref-origin">
-                {f.originGame ? `from ${gameName(f.originGame)} · ` : ""}
-                {f.source === "seed" ? "profile" : "confirmed by you"}
+                {f.originGame ? `${gameName(f.originGame)} · ` : ""}
+                {f.source === "chat_explicit"
+                  ? "remembered from chat"
+                  : f.source === "seed"
+                    ? "profile"
+                    : "confirmed by you"}
               </small>
             </div>
             <button type="button" className="link" onClick={() => void removePersonalFact(f.id)}>
@@ -144,54 +214,61 @@ export function PreferencesPanel({ game }: { game: GameId }) {
             </button>
           </div>
         ))}
-        <div className="pref-quick-facts">
-          {quickCaptures.map((q) => {
-            const val = curVals[q.settingId];
-            if (val === undefined || val === "") return null;
-            const s = byId?.[q.settingId];
-            return (
-              <button
-                key={q.factKey}
-                type="button"
-                className="btn btn-small btn-ghost"
-                onClick={() => void addPersonalFact(game, q.factKey, String(val), q.settingId, s ? `Captured from ${s.exactLabel}` : undefined)}
-              >
-                {q.label} ({String(val)})
-              </button>
-            );
-          })}
-        </div>
-        {factTypes.length ? (
+
+        <details className="pref-manual-details">
+          <summary>Add or edit manually</summary>
           <div className="pref-row" style={{ marginTop: 8 }}>
-            <select value={factKey} onChange={(e) => setFactKey(e.target.value)} aria-label="Personal setup type">
-              {factTypes.map((ft) => (
-                <option key={ft.id} value={ft.id}>
-                  {ft.label}
+            <select value={dir} onChange={(e) => setDir(e.target.value as "prioritize" | "deprioritize")} aria-label="Direction">
+              <option value="prioritize">Prioritize</option>
+              <option value="deprioritize">De-prioritize</option>
+            </select>
+            <select value={dim} onChange={(e) => setDim(e.target.value)} aria-label="Goal">
+              {profile.dimensions.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.label}
                 </option>
               ))}
             </select>
-            <input
-              type="text"
-              className="pref-fact-input"
-              value={factValue}
-              maxLength={80}
-              placeholder={factTypes.find((ft) => ft.id === factKey)?.placeholder ?? "Value"}
-              aria-label="Personal setup value"
-              onChange={(e) => setFactValue(e.target.value)}
-            />
-            <button
-              type="button"
-              className="btn btn-small"
-              disabled={!factValue.trim()}
-              onClick={() => {
-                void addPersonalFact(game, factKey, factValue.trim());
-                setFactValue("");
-              }}
-            >
-              Confirm fact
+            <select value={scope} onChange={(e) => setScope(e.target.value as "session" | "durable")} aria-label="Scope">
+              <option value="durable">lasting</option>
+              <option value="session">this session</option>
+            </select>
+            <button type="button" className="btn btn-small" onClick={() => void addPreference(game, dim, dir, scope)}>
+              Save priority
             </button>
           </div>
-        ) : null}
+          {factTypes.length ? (
+            <div className="pref-row" style={{ marginTop: 8 }}>
+              <select value={factKey} onChange={(e) => setFactKey(e.target.value)} aria-label="Personal setup type">
+                {factTypes.map((ft) => (
+                  <option key={ft.id} value={ft.id}>
+                    {ft.label}
+                  </option>
+                ))}
+              </select>
+              <input
+                type="text"
+                className="pref-fact-input"
+                value={factValue}
+                maxLength={80}
+                placeholder={factTypes.find((ft) => ft.id === factKey)?.placeholder ?? "Value"}
+                aria-label="Personal setup value"
+                onChange={(e) => setFactValue(e.target.value)}
+              />
+              <button
+                type="button"
+                className="btn btn-small"
+                disabled={!factValue.trim()}
+                onClick={() => {
+                  void addPersonalFact(game, factKey, factValue.trim());
+                  setFactValue("");
+                }}
+              >
+                Save note
+              </button>
+            </div>
+          ) : null}
+        </details>
       </section>
     </div>
   );
@@ -250,6 +327,8 @@ export function AssistantPanel({ game }: { game: GameId }) {
   const openWorkspace = useAppStore((s) => s.openWorkspace);
   const proposals = useAppStore((s) => s.proposals[game] ?? EMPTY);
   const pins = useAppStore((s) => s.states[game]?.pins ?? EMPTY);
+  const relevantNow = useAppStore((s) => s.relevantNow[game]);
+  const seenDiscoverIds = useAppStore((s) => s.seenDiscoverIds[game] ?? EMPTY);
   const [tab, setTab] = useState<"main" | "prefs" | "trace">("main");
 
   useEffect(() => {
@@ -259,6 +338,9 @@ export function AssistantPanel({ game }: { game: GameId }) {
   const pendingCount = proposals
     .filter((p) => p.status === "pending")
     .reduce((n, p) => n + p.items.filter((i) => i.status === "pending").length, 0);
+  const unseenDiscoverCount = (relevantNow?.items ?? []).filter(
+    (c) => (c.state === "suggested" || c.state === "changed") && !seenDiscoverIds.includes(c.cardId || c.settingId),
+  ).length;
 
   return (
     <aside className="assistant" aria-label="Assistant (adaptive condition)">
@@ -271,10 +353,13 @@ export function AssistantPanel({ game }: { game: GameId }) {
           <button
             type="button"
             className="btn btn-small"
-            onClick={() => openWorkspace(pendingCount > 0 ? "changes" : pins.length > 0 ? "pinned" : "discover")}
+            onClick={() =>
+              openWorkspace(pendingCount > 0 ? "changes" : unseenDiscoverCount > 0 ? "discover" : pins.length > 0 ? "pinned" : "discover")
+            }
             title="Open Adaptive Workspace (Changes, Pinned, Discover)"
           >
             Workspace{pendingCount ? ` (${pendingCount})` : ""}
+            {unseenDiscoverCount > 0 ? <span className="discover-unseen-dot" aria-label={`${unseenDiscoverCount} new Discover items`} /> : null}
           </button>
         </div>
         {experimenterMode ? <ModelStatusPill /> : null}

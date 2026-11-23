@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { ApiError, api } from "../api/client";
 import type {
+  AppliedMemoryUpdate,
   Catalog,
   ChatMessage,
   Condition,
@@ -111,6 +112,7 @@ interface AppState {
   experimenterMode: boolean;
   scopeOverride: ScopeOverride;
   openCards: Record<string, boolean>;
+  seenDiscoverIds: Record<GameId, string[]>;
   toasts: Toast[];
   composerPrefill: { game: GameId; text: string; nonce: number } | null;
 
@@ -169,6 +171,7 @@ interface AppState {
   markDiscoverChecked: (game: GameId, checkId: string) => Promise<void>;
   revisitOnboarding: (game: GameId) => Promise<void>;
   setCardOpen: (cardId: string, open: boolean) => void;
+  markDiscoverSeen: (game: GameId) => void;
   triggerContext: (game: GameId, eventType: string | null) => Promise<void>;
   loadProfile: () => Promise<void>;
   confirmPreference: (s: PreferenceSuggestion, scope: "session" | "durable", dimension?: string) => Promise<boolean>;
@@ -176,6 +179,8 @@ interface AppState {
   removePreference: (id: string) => Promise<void>;
   addPersonalFact: (game: GameId, factKey: string, valueText: string, sourceSettingId?: string, note?: string) => Promise<void>;
   removePersonalFact: (id: string) => Promise<void>;
+  undoMemoryUpdate: (update: AppliedMemoryUpdate) => Promise<void>;
+  navigateCrossGame: (targetGame: GameId, settingId: string) => Promise<void>;
   clearGoals: (game: GameId) => Promise<void>;
   loadTraces: () => Promise<void>;
   reset: (scenario: string, mode: "full" | "ai_only") => Promise<void>;
@@ -249,6 +254,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   experimenterMode: readInitialExperimenterMode(),
   scopeOverride: "auto",
   openCards: {},
+  seenDiscoverIds: { valorant: [], cs2: [] },
   toasts: [],
   composerPrefill: null,
 
@@ -405,11 +411,38 @@ export const useAppStore = create<AppState>((set, get) => ({
   refreshAdaptive: async (game) => {
     const session = get().session;
     if (!session || session.condition !== "adaptive") return;
-    const [proposals, chat, profile] = await Promise.all([api.proposals(game, "pending"), api.thread(game), api.profile()]);
+    const [proposals, chat, profile] = await Promise.all([
+      api.proposals(game, "pending"),
+      api.thread(game),
+      api.profile(game),
+    ]);
     set((s) => ({ proposals: { ...s.proposals, [game]: proposals }, chat: { ...s.chat, [game]: chat }, profile }));
     try {
-      const rn = await api.relevantNow(game);
-      set((s) => ({ relevantNow: { ...s.relevantNow, [game]: rn } }));
+      let rn = await api.relevantNow(game);
+      const anyCardOpen = Object.values(get().openCards).some(Boolean);
+      const existingRn = get().relevantNow[game];
+      if (!anyCardOpen && rn.updateAvailable) {
+        try {
+          rn = await api.refreshRelevantNow(game);
+        } catch {
+          // fall back to current rn if auto-sync fails
+        }
+      }
+      const preserveStable = anyCardOpen && existingRn && existingRn.items.length > 0;
+      set((s) => ({
+        relevantNow: {
+          ...s.relevantNow,
+          [game]: preserveStable
+            ? {
+                ...existingRn,
+                updateAvailable: true,
+                onboardingStatus: rn.onboardingStatus,
+                canRevisitOnboarding: rn.canRevisitOnboarding,
+                context: rn.context,
+              }
+            : rn,
+        },
+      }));
     } catch (err) {
       get().toast("error", errText(err));
     }
@@ -906,12 +939,14 @@ export const useAppStore = create<AppState>((set, get) => ({
       const run = await api.chat(game, text, { tabId: nav.tabId, subtabId: nav.subtabId, path }, scope);
       set((s) => ({ runs: { ...s.runs, [game]: run } }));
       const thread = await api.thread(game);
-      set((s) => ({ chat: { ...s.chat, [game]: thread } }));
+      // Avoid split-brain render where the assistant message shows before staged proposals are fetched.
+      const safeThread = thread.filter((m) => !(m.role === "assistant" && m.runId === run.runId));
+      set((s) => ({ chat: { ...s.chat, [game]: safeThread } }));
       const poll = async () => {
         const status = await api.run(run.runId);
         set((s) => ({ runs: { ...s.runs, [game]: status } }));
         if (status.status === "running") {
-          window.setTimeout(poll, 400);
+          window.setTimeout(poll, 350);
           return;
         }
         set((s) => ({ runs: { ...s.runs, [game]: null } }));
@@ -924,7 +959,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           get().toast("info", `${res.stagedCount} change(s) ready to review — nothing has been applied.`);
         }
       };
-      window.setTimeout(poll, 300);
+      window.setTimeout(poll, 60);
     } catch (err) {
       get().toast("error", errText(err));
     }
@@ -988,7 +1023,31 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  setCardOpen: (cardId, open) => set((s) => ({ openCards: { ...s.openCards, [cardId]: open } })),
+  setCardOpen: (cardId, open) => {
+    set((s) => ({ openCards: { ...s.openCards, [cardId]: open } }));
+    if (!open) {
+      const nextOpen = get().openCards;
+      const anyOpen = Object.values(nextOpen).some(Boolean);
+      const game = get().session?.selectedGame;
+      const rn = game ? get().relevantNow[game] : undefined;
+      if (!anyOpen && game && rn?.updateAvailable) {
+        void get().refreshRelevantNow(game);
+      }
+    }
+  },
+
+  markDiscoverSeen: (game) => {
+    const rn = get().relevantNow[game];
+    const ids = (rn?.items ?? [])
+      .filter((c) => c.state === "suggested" || c.state === "changed")
+      .map((c) => c.cardId || c.settingId);
+    set((s) => ({
+      seenDiscoverIds: {
+        ...s.seenDiscoverIds,
+        [game]: Array.from(new Set([...(s.seenDiscoverIds[game] ?? []), ...ids])),
+      },
+    }));
+  },
 
   triggerContext: async (game, eventType) => {
     try {
@@ -1060,6 +1119,32 @@ export const useAppStore = create<AppState>((set, get) => ({
       await get().refreshAdaptive(game);
       broadcastSync({ type: "state_changed", game });
     }
+  },
+
+  undoMemoryUpdate: async (update) => {
+    try {
+      if (update.kind === "preference") {
+        await api.removePreference(update.id);
+      } else {
+        await api.removePersonalFact(update.id);
+      }
+      const game = update.game || update.originGame || get().session?.selectedGame;
+      if (game) {
+        await get().refreshAdaptive(game);
+        broadcastSync({ type: "state_changed", game });
+      }
+      get().toast("info", `Undid saved item: ${update.label}`);
+    } catch (err) {
+      get().toast("error", errText(err));
+    }
+  },
+
+  navigateCrossGame: async (targetGame, settingId) => {
+    const cur = get().session?.selectedGame;
+    if (cur !== targetGame) {
+      await get().switchGame(targetGame);
+    }
+    get().goToSetting(targetGame, settingId, "assistant");
   },
 
   clearGoals: async (game) => {

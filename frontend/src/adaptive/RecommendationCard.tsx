@@ -1,12 +1,24 @@
 import { useState, type ReactNode } from "react";
 import { descriptionSourceLabel, verificationLabel } from "../lib/format";
 
-export type CardState = "suggested" | "staged" | "applied" | "dismissed" | "locked" | "changed" | "stale" | "undone";
+export type CardState =
+  | "suggested"
+  | "staged"
+  | "applied"
+  | "checked"
+  | "no_longer_relevant"
+  | "dismissed"
+  | "locked"
+  | "changed"
+  | "stale"
+  | "undone";
 
 const STATE_LABEL: Record<CardState, string> = {
   suggested: "Suggested",
   staged: "Ready for review",
-  applied: "Applied",
+  applied: "Applied ✓",
+  checked: "Checked",
+  no_longer_relevant: "No longer relevant",
   dismissed: "Dismissed",
   locked: "Locked by you",
   changed: "Setting changed since",
@@ -61,7 +73,16 @@ export function RecommendationCard({
   const [showWhy, setShowWhy] = useState(false);
   const resolved = card.state !== "suggested" && card.state !== "changed";
   const inspectOnly = card.kind === "inspect";
-  const stateLabel = inspectOnly && card.state === "applied" ? "Checked" : inspectOnly && card.state === "suggested" ? "Manual review" : STATE_LABEL[card.state];
+  const stateLabel =
+    card.state === "checked"
+      ? "Checked"
+      : card.state === "applied"
+        ? inspectOnly
+          ? "Checked"
+          : "Applied ✓"
+        : inspectOnly && card.state === "suggested"
+          ? "Manual review"
+          : STATE_LABEL[card.state];
 
   return (
     <article className={`rec-card prov-${card.provenance} state-${card.state}`} aria-label={`Suggestion: ${card.label}`}>
@@ -94,16 +115,18 @@ export function RecommendationCard({
         </p>
       ) : null}
       <div className="rec-why">
-        <span className="layer-label">Why this is relevant</span>
+        <span className="layer-label">
+          Why suggested now <span className="rec-origin-chip">{card.whyOrigin}</span>
+        </span>
         <p>{card.why}</p>
       </div>
       <button type="button" className="rec-more" aria-expanded={expanded} onClick={toggle}>
-        {expanded ? "Hide details" : "What it does & trade-offs"}
+        {expanded ? "Hide details" : "What this setting does & trade-offs"}
       </button>
       {expanded ? (
         <div className="rec-layers">
           <div className="layer">
-            <span className="layer-label">What it does <small>(from {descriptionSourceLabel(card.whatItDoesSource)})</small></span>
+            <span className="layer-label">What this setting does <small>(from {descriptionSourceLabel(card.whatItDoesSource)})</small></span>
             <p>{card.whatItDoes}</p>
           </div>
           {card.tradeoff ? (

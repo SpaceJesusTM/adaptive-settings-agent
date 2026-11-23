@@ -60,6 +60,11 @@ function ItemRow({
             <span className="rec-to">{item.effectiveDisplay}</span>
           )}
           {item.editedValue !== null ? <span className="chip">edited by you</span> : null}
+          {item.confidence === "low" ? (
+            <span className="chip chip-warn" title="Editorial or secondary trade-off suggestion — double-check before applying.">
+              Lower confidence
+            </span>
+          ) : null}
           {JSON.stringify(item.effectiveValue) === JSON.stringify(item.baselineValue) ? (
             <span className="chip chip-warn" title="This matches the current setting value, so applying it will make no change.">
               matches current
@@ -236,13 +241,73 @@ function ProposalBlock({ proposal }: { proposal: Proposal }) {
         ) : null}
       </header>
 
+      {proposal.freshnessWarning ? (
+        <div className={`tray-freshness-banner status-${proposal.freshnessStatus ?? "outdated_goal"}`} role="status">
+          <div className="tray-freshness-copy">
+            <strong>
+              {proposal.freshnessStatus === "historical_preference"
+                ? "Historical setup mismatch"
+                : proposal.freshnessStatus === "technically_stale"
+                  ? "Menu values changed since staging"
+                  : "Prepared for an earlier goal"}
+            </strong>
+            <p>{proposal.freshnessWarning}</p>
+          </div>
+          {proposal.freshnessStatus !== "technically_stale" ? (
+            <button
+              type="button"
+              className="btn btn-small"
+              onClick={() => void reject(proposal, undefined, "Superseded by updated goal")}
+            >
+              Reject outdated draft
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
+      {pending.length >= 6 ? (
+        <div className="tray-confidence-strip" role="note" aria-label="Large batch review summary">
+          <div className="tray-conf-counts">
+            <span>Review summary ({pending.length} changes):</span>
+            <span className="chip">{pending.filter((i) => i.confidence === "high" || i.confidence === "medium").length} medium/high confidence</span>
+            {pending.some((i) => i.confidence === "low") ? (
+              <span className="chip chip-warn">{pending.filter((i) => i.confidence === "low").length} lower confidence</span>
+            ) : null}
+            {pending.some((i) => i.editedValue !== undefined && i.editedValue !== null) ? (
+              <span className="chip">{pending.filter((i) => i.editedValue !== undefined && i.editedValue !== null).length} edited by you</span>
+            ) : null}
+            {pending.some((i) => i.stale) ? (
+              <span className="chip chip-warn">{pending.filter((i) => i.stale).length} stale</span>
+            ) : null}
+          </div>
+          {pending.some((i) => i.confidence === "low") ? (
+            <button
+              type="button"
+              className="link"
+              onClick={() => {
+                const next: Record<string, boolean> = {};
+                for (const item of selectable) {
+                  if (item.confidence !== "low") next[item.id] = true;
+                }
+                setSelected(next);
+              }}
+            >
+              Keep medium/high only
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
       {showPlanDetails && proposal.plan ? (
         <div className="tray-plan-summary">
           <p>{proposal.plan.reason}</p>
           <p className="muted">
             Evaluated {proposal.plan.coverage.evaluatedCount} settings · {proposal.plan.coverage.proposedCount} proposed ·{" "}
-            {proposal.plan.coverage.alreadyAlignedCount} already aligned · {proposal.plan.coverage.lockedCount} locked ·{" "}
-            {proposal.plan.coverage.manualCount} manual/personal excluded
+            {proposal.plan.coverage.alreadyAlignedCount} already aligned ·{" "}
+            {(proposal.plan.coverage.tradeoffRetainedCount ?? proposal.plan.tradeoffRetainedItems?.length ?? 0) > 0
+              ? `${proposal.plan.coverage.tradeoffRetainedCount ?? proposal.plan.tradeoffRetainedItems?.length} retained due to trade-off · `
+              : ""}
+            {proposal.plan.coverage.lockedCount} locked · {proposal.plan.coverage.manualCount} manual/personal excluded
           </p>
           {proposal.plan.partialCoverage ? (
             <p className="tray-warn">
@@ -296,6 +361,7 @@ function ProposalBlock({ proposal }: { proposal: Proposal }) {
 
       {proposal.plan &&
       ((proposal.plan.alreadyAlignedItems?.length ?? 0) > 0 ||
+        (proposal.plan.tradeoffRetainedItems?.length ?? 0) > 0 ||
         (proposal.plan.manualConsiderations?.length ?? 0) > 0 ||
         (proposal.plan.lockedItems?.length ?? 0) > 0 ||
         (proposal.plan.unavailableItems?.length ?? 0) > 0) ? (
@@ -327,6 +393,28 @@ function ProposalBlock({ proposal }: { proposal: Proposal }) {
             </div>
           ) : null}
 
+          {(proposal.plan.tradeoffRetainedItems?.length ?? 0) > 0 ? (
+            <div className="review-group">
+              <div className="review-group-head">
+                <strong>Retained due to trade-off ({proposal.plan.tradeoffRetainedItems!.length})</strong>
+                <span className="muted">Skipped to protect an active preference or opposing priority</span>
+              </div>
+              <ul className="review-info-list">
+                {proposal.plan.tradeoffRetainedItems!.map((t) => (
+                  <li key={t.settingId} className="review-info-item">
+                    <div>
+                      <strong>{t.label}</strong> <span className="chip chip-warn">Kept {t.currentDisplay}</span>
+                      <span className="review-info-why"> — {t.reason}</span>
+                    </div>
+                    <button type="button" className="link" onClick={() => requestFocus(proposal.game, t.settingId)}>
+                      Show in settings
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
           {(proposal.plan.manualConsiderations?.length ?? 0) > 0 ? (
             <div className="review-group">
               <div className="review-group-head">
@@ -349,7 +437,7 @@ function ProposalBlock({ proposal }: { proposal: Proposal }) {
             </div>
           ) : null}
 
-          {(proposal.plan.lockedItems?.length ?? 0) > 0 || (proposal.plan.unavailableItems?.length ?? 0) > 0 ? (
+          {(proposal.plan?.lockedItems?.length ?? 0) > 0 || (proposal.plan?.unavailableItems?.length ?? 0) > 0 ? (
             <div className="review-group">
               <div className="review-group-head">
                 <strong>Locked or unavailable</strong>
@@ -577,6 +665,8 @@ export function AdaptiveWorkspace({
   const proposals = useAppStore((s) => s.proposals[game] ?? EMPTY);
   const pins = useAppStore((s) => s.states[game]?.pins ?? EMPTY);
   const relevant = useAppStore((s) => s.relevantNow[game]);
+  const seenDiscoverIds = useAppStore((s) => s.seenDiscoverIds[game] ?? EMPTY);
+  const markDiscoverSeen = useAppStore((s) => s.markDiscoverSeen);
   const open = useAppStore((s) => s.workspaceOpen);
   const setOpen = useAppStore((s) => s.setWorkspaceOpen);
   const activeTab = useAppStore((s) => s.workspaceTab);
@@ -586,7 +676,10 @@ export function AdaptiveWorkspace({
 
   const pending = proposals.filter((p) => p.status === "pending");
   const pendingCount = pending.reduce((n, p) => n + p.items.filter((i) => i.status === "pending").length, 0);
-  const discoverCount = (relevant?.items ?? []).filter((c) => c.state === "suggested").length;
+  const discoverCount = (relevant?.items ?? []).filter((c) => c.state === "suggested" || c.state === "changed").length;
+  const unseenDiscoverCount = (relevant?.items ?? []).filter(
+    (c) => (c.state === "suggested" || c.state === "changed") && !seenDiscoverIds.includes(c.cardId || c.settingId),
+  ).length;
   const isOpen = mode === "standalone" ? true : open;
   const detachedUrl = `?view=workspace&game=${game}`;
 
@@ -634,9 +727,13 @@ export function AdaptiveWorkspace({
             onClick={() => {
               setTab("discover");
               if (!isOpen) setOpen(true);
+              markDiscoverSeen(game);
             }}
           >
-            Discover <span className="tray-count">{discoverCount}</span>
+            Discover <span className={`tray-count ${discoverCount ? "has-items" : ""}`}>{discoverCount}</span>
+            {unseenDiscoverCount > 0 ? (
+              <span className="discover-unseen-dot" title={`${unseenDiscoverCount} new Discover item(s)`} aria-label={`${unseenDiscoverCount} new`} />
+            ) : null}
           </button>
         </div>
 

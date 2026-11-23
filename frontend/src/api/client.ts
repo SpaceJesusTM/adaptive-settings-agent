@@ -154,7 +154,7 @@ export const api = {
   contextEventTypes: () => request<ContextEventType[]>("GET", "/api/context-events"),
   setContextEvent: (game: GameId, eventType: string | null) =>
     request<RelevantNowSet>("POST", "/api/context-events", { game, eventType }),
-  profile: () => request<Profile>("GET", "/api/profile"),
+  profile: (game?: GameId) => request<Profile>("GET", `/api/profile${game ? `?game=${game}` : ""}`),
   addPreference: (body: {
     dimension: string;
     direction: "prioritize" | "deprioritize";

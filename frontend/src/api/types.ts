@@ -186,6 +186,7 @@ export interface HistoryEvent {
 export interface HistoryProvenance {
   hasRecordedRationale: boolean;
   userRequest: string | null;
+  userRequestIsExcerpt?: boolean;
   runId: string | null;
   model: string | null;
   proposalTitle: string | null;
@@ -207,6 +208,7 @@ export interface HistoryBatch {
   undoable: boolean;
   superseded?: boolean;
   supersededCount?: number;
+  outdatedForCurrentGoal?: boolean;
   provenance?: HistoryProvenance;
   events: HistoryEvent[];
   gameRevision: number;
@@ -263,6 +265,7 @@ export interface PlanCoverage {
   eligibleCount: number;
   proposedCount: number;
   alreadyAlignedCount: number;
+  tradeoffRetainedCount?: number;
   alreadyStagedCount: number;
   lockedCount: number;
   unavailableCount: number;
@@ -316,6 +319,18 @@ export interface PlanStatusItem {
   reason: string;
 }
 
+export interface TradeoffRetainedItem {
+  settingId: string;
+  label: string;
+  path: string;
+  category: string;
+  currentDisplay: string;
+  reason: string;
+  conflictsWith?: string[];
+  whatItDoes: string;
+  tradeoffs: string | null;
+}
+
 export interface PlanMetadata {
   scope: "explain_only" | "focused" | "category_optimization" | "broad_optimization" | "full_game_setup";
   maxRecommendations: number;
@@ -332,6 +347,7 @@ export interface PlanMetadata {
   restagedFromBatchId?: string | null;
   coverage: PlanCoverage;
   alreadyAlignedItems?: PlanAlignedItem[];
+  tradeoffRetainedItems?: TradeoffRetainedItem[];
   lockedItems?: PlanStatusItem[];
   unavailableItems?: PlanStatusItem[];
   manualConsiderations: PlanManualConsideration[];
@@ -359,6 +375,10 @@ export interface Proposal {
   appliedBatchId: string | null;
   autoStaged?: boolean;
   restagedFromBatchId?: string | null;
+  generatedGoalText?: string | null;
+  generatedGoalDimensions?: string[];
+  freshnessStatus?: "consistent" | "outdated_goal" | "historical_preference" | "technically_stale";
+  freshnessWarning?: string | null;
   plan?: PlanMetadata | null;
   items: ProposalItem[];
 }
@@ -462,6 +482,13 @@ export interface CrossGameComparison {
   differences: string;
   safetyNote: string;
   proposable: boolean;
+  sourceGame?: GameId;
+  targetGame?: GameId;
+  directionExplicit?: boolean;
+  discrepancyNote?: string | null;
+  sourceEvidence?: string;
+  sourceEvidenceLabel?: string;
+  targetNavigateGame?: GameId;
   valorantSettings: CrossGameSettingRef[];
   cs2Settings: CrossGameSettingRef[];
   confirmedFacts?: PersonalFact[];
@@ -469,15 +496,31 @@ export interface CrossGameComparison {
   sensitivityConversion?: SensitivityConversionResult;
 }
 
+export interface AppliedMemoryUpdate {
+  kind: "preference" | "fact";
+  id: string;
+  label: string;
+  dimension?: string;
+  dimensionLabel?: string;
+  direction?: "prioritize" | "deprioritize";
+  scope?: "session" | "durable";
+  factKey?: string;
+  valueText?: string;
+  originGame?: GameId;
+  game?: GameId;
+}
+
 export interface AssistantResponse {
   intent: string;
   reply: string;
   knownsAndUnknowns: string | null;
   goalDimensions: string[];
+  goalChanged?: boolean;
   recommendations: Recommendation[];
   explanations: Explanation[];
   navigateTo: { settingId: string; label: string; path: string; tabId: string; subtabId: string } | null;
   preferenceSuggestions: PreferenceSuggestion[];
+  appliedMemoryUpdates?: AppliedMemoryUpdate[];
   clarifyingQuestion: string | null;
   filtered: { settingRef?: string; settingId?: string; kind: string; reason: string }[];
   validationNotes: string[];
@@ -524,6 +567,8 @@ export interface RelevantCard {
   triggerGroup?: "onboarding" | "context_event" | "followup" | "goal_or_preference";
   triggerLabel?: string;
   checkId?: string;
+  ruleId?: string;
+  triggerBatchId?: string;
   settingId: string;
   label: string;
   path: string;
@@ -537,13 +582,14 @@ export interface RelevantCard {
   whatItDoes: string;
   whatItDoesSource: string;
   why: string;
+  whyOrigin?: "goal_hint" | "followup_rule" | "onboarding_observation";
   whyBasis: "official" | "editorial";
   basedOn: string[];
   crossGame: boolean;
   tradeoff: string | null;
   sourceURL: string;
   verificationStatus: string;
-  state: "suggested" | "staged" | "applied" | "dismissed" | "locked" | "changed" | "stale";
+  state: "suggested" | "staged" | "applied" | "checked" | "no_longer_relevant" | "dismissed" | "locked" | "changed" | "stale";
   liveValue?: Value;
   liveDisplay?: string;
   dismissReason?: string | null;
@@ -573,7 +619,7 @@ export interface Preference {
   source: string;
   note: string | null;
   createdAt: string;
-  evidence: { kind: string; game: string | null; setting_id: string | null; detail: string | null; created_at: string }[];
+  evidence: { kind: string; game: string | null; setting_id: string | null; detail: string | null; created_at: string; sourceCategory?: string }[];
 }
 
 export interface PersonalFact {
@@ -613,6 +659,60 @@ export interface SessionGoal {
   createdAt: string;
 }
 
+export interface ObservedSetting {
+  settingId: string;
+  game: GameId;
+  label: string;
+  path: string;
+  controlType: string;
+  value: Value;
+  display: string;
+  sourceKind: string;
+  sourceLabel: string;
+  deliberate: boolean;
+  batchId?: string | null;
+  updatedAt?: string | null;
+  matchesDefault: boolean;
+}
+
+export interface FactDiscrepancy {
+  factId: string;
+  factKey: string;
+  label: string;
+  savedValue: string;
+  game: GameId;
+  settingId: string;
+  settingLabel: string;
+  liveValue: Value;
+  liveDisplay: string;
+  liveSourceKind: string;
+  explanation: string;
+}
+
+export interface TentativeSignal {
+  dimension: string;
+  dimensionLabel: string;
+  tentative: boolean;
+  explanation: string;
+}
+
+export interface RecentObservedAction {
+  batchId: string;
+  game: GameId;
+  source: string;
+  label: string;
+  count: number;
+  createdAt: string;
+  summary: string;
+}
+
+export interface ObservedSummary {
+  keySettings: ObservedSetting[];
+  recentActions: RecentObservedAction[];
+  tentativeSignals: TentativeSignal[];
+  discrepancies: FactDiscrepancy[];
+}
+
 export interface Profile {
   preferences: Preference[];
   personalFacts?: PersonalFact[];
@@ -620,8 +720,9 @@ export interface Profile {
   sessionGoals: Record<GameId, SessionGoal[]>;
   conflicts?: Record<GameId, GoalPreferenceConflict[]>;
   context: Record<GameId, RelevantNowSet["context"]>;
-  evidence: { id: string; kind: string; dimension: string | null; game: string | null; detail: string | null; created_at: string }[];
+  evidence: { id: string; kind: string; dimension: string | null; game: string | null; preference_id?: string | null; detail: string | null; created_at: string }[];
   dimensions: { id: string; label: string }[];
+  observed?: ObservedSummary;
 }
 
 export interface ModelStatus {

@@ -60,13 +60,16 @@ export function HistoryDrawer() {
                     <span className="badge badge-current">Active</span>
                   )}
                   {prov?.restagedFromBatchId ? <span className="badge">Restaged</span> : null}
+                  {b.outdatedForCurrentGoal ? (
+                    <span className="badge badge-warn">Outdated for current goal</span>
+                  ) : null}
                 </div>
 
                 {b.label ? <div className="history-label">{b.label}</div> : null}
 
                 {prov?.userRequest ? (
                   <p className="history-request">
-                    <strong>Original request:</strong> “{prov.userRequest}”
+                    <strong>{prov.userRequestIsExcerpt ? "Request excerpt:" : "Original request:"}</strong> “{prov.userRequest}”
                   </p>
                 ) : hasRationale && prov?.planReason ? (
                   <p className="history-request">{prov.planReason}</p>

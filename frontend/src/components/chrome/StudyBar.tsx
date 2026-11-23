@@ -69,6 +69,8 @@ export function StudyBar() {
   const focusDetachedWorkspace = useAppStore((s) => s.focusDetachedWorkspace);
   const recallDetachedWorkspace = useAppStore((s) => s.recallDetachedWorkspace);
   const proposals = useAppStore((s) => s.proposals[session.selectedGame] ?? EMPTY);
+  const relevantNow = useAppStore((s) => s.relevantNow[session.selectedGame]);
+  const seenDiscoverIds = useAppStore((s) => s.seenDiscoverIds[session.selectedGame] ?? EMPTY);
   const [controlsOpen, setControlsOpen] = useState(false);
 
   const game = session.selectedGame;
@@ -76,6 +78,9 @@ export function StudyBar() {
   const pendingCount = proposals
     .filter((p) => p.status === "pending")
     .reduce((n, p) => n + p.items.filter((i) => i.status === "pending").length, 0);
+  const unseenDiscoverCount = (relevantNow?.items ?? []).filter(
+    (c) => (c.state === "suggested" || c.state === "changed") && !seenDiscoverIds.includes(c.cardId || c.settingId),
+  ).length;
 
   return (
     <header className="studybar">
@@ -144,9 +149,14 @@ export function StudyBar() {
             type="button"
             className={`sb-btn ${pendingCount ? "is-accent" : ""}`}
             aria-expanded={workspaceOpen}
-            onClick={() => (workspaceOpen ? setWorkspaceOpen(false) : openWorkspace("changes"))}
+            onClick={() =>
+              workspaceOpen
+                ? setWorkspaceOpen(false)
+                : openWorkspace(pendingCount > 0 ? "changes" : unseenDiscoverCount > 0 ? "discover" : "changes")
+            }
           >
             Workspace{pendingCount ? ` (${pendingCount})` : ""}
+            {unseenDiscoverCount > 0 ? <span className="discover-unseen-dot" title={`${unseenDiscoverCount} new Discover item(s)`} aria-label={`${unseenDiscoverCount} unseen Discover suggestions`} /> : null}
           </button>
         )
       ) : null}
