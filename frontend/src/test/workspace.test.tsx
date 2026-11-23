@@ -5,6 +5,8 @@ import { api } from "../api/client";
 import { AdaptiveWorkspace } from "../adaptive/AdaptiveWorkspace";
 import { AssistantPanel } from "../adaptive/AssistantPanel";
 import { Chat, participantStepLabel } from "../adaptive/Chat";
+import { StandaloneWorkspace } from "../adaptive/StandaloneWorkspace";
+import { HistoryDrawer, Toasts } from "../components/chrome/HistoryDrawer";
 import { StudyBar } from "../components/chrome/StudyBar";
 import { HudEdgeEditor } from "../games/cs2/HudEdgeEditor";
 import { ValorantCrosshairPreview } from "../games/valorant/ValorantCrosshairPreview";
@@ -295,5 +297,95 @@ describe("PreferenceChip confirmation and participant progress feedback", () => 
     expect(participantStepLabel("Checking suggestions against the catalogue, locks and allowed values")).toBe(
       "Validating suggestions (nothing applied yet)…",
     );
+  });
+});
+
+describe("StandaloneWorkspace & HistoryDrawer", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    seedAdaptive();
+    window.history.replaceState(null, "", "/");
+  });
+
+  it("StandaloneWorkspace renders Study controls and Trace only when Experimenter mode is toggled on", async () => {
+    seedAdaptive({
+      traces: [],
+      profile: {
+        preferences: [],
+        sessionGoals: { valorant: [], cs2: [] },
+        context: { valorant: null, cs2: null },
+        evidence: [],
+        dimensions: [],
+      },
+    });
+    vi.spyOn(api, "traces").mockResolvedValue([]);
+    render(<StandaloneWorkspace />);
+
+    expect(screen.getByRole("tab", { name: "Chat" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Goals & preferences" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Study controls" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Trace" })).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: "Experimenter" }));
+    expect(screen.getByRole("button", { name: "Study controls" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Trace" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("tab", { name: "Trace" }));
+
+    await userEvent.click(screen.getByRole("button", { name: /Experimenter ✓/ }));
+    expect(screen.queryByRole("button", { name: "Study controls" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Trace" })).toBeNull();
+    expect(screen.getByRole("tab", { name: "Chat" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("HistoryDrawer broadcasts navigation and shows a detached toast in ?view=workspace", async () => {
+    window.history.replaceState(null, "", "/?view=workspace&game=valorant");
+    try {
+      seedAdaptive({
+        historyOpen: true,
+        toasts: [],
+        history: {
+          valorant: [
+            {
+              batchId: "bat_1",
+              game: "valorant",
+              source: "manual",
+              sourceLabel: "Manual change",
+              label: "VSync",
+              condition: "adaptive",
+              values: {},
+              proposalId: null,
+              undoesBatchId: null,
+              undoneByBatchId: null,
+              undoable: true,
+              createdAt: new Date().toISOString(),
+              gameRevision: 1,
+              events: [
+                {
+                  eventId: "ev_1",
+                  settingId: "val.video.vsync",
+                  label: "VSync",
+                  path: "Video > Graphics Quality > VSync",
+                  oldValue: "on",
+                  newValue: "off",
+                  oldDisplay: "On",
+                  newDisplay: "Off",
+                },
+              ],
+            },
+          ],
+        },
+      });
+      render(
+        <>
+          <HistoryDrawer />
+          <Toasts />
+        </>,
+      );
+
+      await userEvent.click(screen.getByRole("button", { name: "VSync" }));
+      expect(await screen.findByText(/Highlighted VSync in the main settings window/)).toBeInTheDocument();
+    } finally {
+      window.history.replaceState(null, "", "/");
+    }
   });
 });

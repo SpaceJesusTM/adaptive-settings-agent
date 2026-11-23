@@ -671,6 +671,8 @@
 }
 .tray-phead {
   display: flex;
+  flex-wrap: wrap;
+  row-gap: 6px;
   gap: 8px;
   align-items: center;
 }
@@ -678,6 +680,7 @@
   margin-left: auto;
   color: var(--chrome-muted);
   font-size: 12px;
+  white-space: nowrap;
 }
 .tray-items {
   list-style: none;
@@ -713,48 +716,105 @@
 .tray-edit {
   min-width: 220px;
 }
-.tray-edit .ctl-dropdown {
+.aw-workspace .ctl-dropdown {
   position: relative;
   display: inline-block;
   width: fit-content;
 }
-.tray-edit select {
+.aw-workspace .ctl-dropdown select {
   background: #0e1117;
+  color: var(--chrome-text);
   border: 1px solid #2a313d;
   border-radius: 4px;
   padding: 4px 26px 4px 8px;
+  font-size: 13px;
   appearance: none;
+  cursor: pointer;
 }
-.tray-edit .ctl-dropdown-arrow {
+.aw-workspace .ctl-dropdown-arrow {
   position: absolute;
   right: 8px;
   top: 50%;
   transform: translateY(-50%);
   pointer-events: none;
+  color: var(--chrome-muted);
+  font-size: 11px;
 }
-.tray-edit .ctl-segmented {
+.aw-workspace .ctl-segmented {
   display: inline-grid;
   gap: 2px;
 }
-.tray-edit .seg {
+.aw-workspace .seg {
   border: 1px solid #2a313d;
   background: #0e1117;
-  padding: 3px 10px;
+  color: var(--chrome-muted);
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 12.5px;
 }
-.tray-edit .seg.is-selected {
+.aw-workspace .seg.is-selected {
   background: #2a3550;
+  border-color: var(--accent);
+  color: var(--chrome-text);
 }
-.tray-edit .ctl-slider {
+.aw-workspace .ctl-slider {
   display: flex;
   gap: 8px;
   align-items: center;
+  flex-wrap: wrap;
 }
-.tray-edit .ctl-slider-value {
+.aw-workspace .ctl-slider-value {
   width: 64px;
   background: #0e1117;
+  color: var(--chrome-text);
   border: 1px solid #2a313d;
   border-radius: 4px;
-  padding: 2px 6px;
+  padding: 3px 6px;
+  font-size: 13px;
+}
+.aw-workspace .ctl-slider-range {
+  width: 140px;
+  accent-color: var(--accent);
+}
+.aw-workspace .ctl-slider-suffix {
+  font-size: 12px;
+  color: var(--chrome-muted);
+}
+.aw-workspace .ctl-keybind {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.aw-workspace .key-cell {
+  min-width: 74px;
+  padding: 4px 10px;
+  border: 1px solid #2a313d;
+  border-radius: 4px;
+  background: #0e1117;
+  color: var(--chrome-text);
+  font-size: 12.5px;
+  text-align: center;
+}
+.aw-workspace .key-cell.is-capturing {
+  border-color: var(--accent);
+  background: rgba(142, 162, 255, 0.16);
+}
+.aw-workspace .key-cell-alt {
+  opacity: 0.45;
+  cursor: default;
+}
+.aw-workspace .key-clear {
+  width: 24px;
+  height: 24px;
+  border: 1px solid #2a313d;
+  border-radius: 4px;
+  background: #141923;
+  color: var(--chrome-muted);
+  line-height: 1;
+}
+.chip.chip-warn {
+  border-color: rgba(227, 179, 65, 0.55);
+  color: #f0d48c;
 }
 .tray-why {
   margin: 2px 0;
@@ -774,10 +834,12 @@
 .aw-workspace .tray-actions {
   position: sticky;
   bottom: 0;
-  background: #0d1117;
-  border-top: 1px solid #1f2633;
-  padding: 10px 0 4px;
-  margin-top: 8px;
+  margin: 10px -12px 0;
+  padding: 10px 12px 12px;
+  background: #131820;
+  border-top: 1px solid #262d39;
+  border-radius: 0 0 7px 7px;
+  box-shadow: 0 -8px 18px rgba(11, 13, 17, 0.72);
   z-index: 4;
 }
 
@@ -859,6 +921,7 @@
 .aw-workspace {
   display: flex;
   flex-direction: column;
+  min-height: 0;
   background: #0d1117;
   border-top: 1px solid var(--chrome-line);
 }
@@ -913,18 +976,39 @@
 .aw-workspace .tray-body {
   flex: 1 1 auto;
   min-height: 0;
+  max-height: none;
   overflow: auto;
-  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 16px 0;
+}
+.aw-workspace .tray-proposal {
+  flex: 0 0 auto;
+  padding: 10px 12px 0;
+  margin-bottom: 14px;
+}
+.aw-workspace .tray-empty,
+.aw-workspace .pinned-panel {
+  padding-bottom: 16px;
+}
+.aw-workspace .rn {
+  max-height: none;
+  overflow: visible;
+  border-bottom: 0;
+  padding: 0 0 16px;
 }
 .tray-meta-count {
   font-size: 12px;
   color: var(--chrome-muted);
+  white-space: nowrap;
 }
 .tray-bulk {
   margin-left: auto;
   display: inline-flex;
   gap: 8px;
   font-size: 12px;
+  white-space: nowrap;
 }
 .tray-plan-summary {
   padding: 8px 10px;
@@ -1107,9 +1191,18 @@
   .standalone-grid {
     flex-direction: column;
   }
-  .assistant,
-  .standalone-chat-pane {
+  .standalone-workspace-pane {
+    flex: 1 1 0;
+    min-height: 0;
+  }
+  .assistant {
     flex: 0 0 46vh;
+    border-left: 0;
+    border-top: 1px solid var(--chrome-line);
+  }
+  .standalone-chat-pane {
+    flex: 0 0 42%;
+    min-height: 220px;
     border-left: 0;
     border-top: 1px solid var(--chrome-line);
   }

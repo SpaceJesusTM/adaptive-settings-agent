@@ -8,7 +8,7 @@ export function HistoryDrawer() {
   const game = useAppStore((s) => s.session?.selectedGame);
   const history = useAppStore((s) => (game ? s.history[game] : undefined));
   const undo = useAppStore((s) => s.undo);
-  const goToSetting = useAppStore((s) => s.goToSetting);
+  const requestFocusInMainWindow = useAppStore((s) => s.requestFocusInMainWindow);
 
   useEffect(() => {
     if (!open) return;
@@ -41,7 +41,7 @@ export function HistoryDrawer() {
               <ul className="history-events">
                 {b.events.map((e) => (
                   <li key={e.eventId}>
-                    <button type="button" className="link" onClick={() => { setOpen(false); goToSetting(game, e.settingId, "history"); }}>{e.label}</button>
+                    <button type="button" className="link" onClick={() => { setOpen(false); requestFocusInMainWindow(game, e.settingId, "history"); }}>{e.label}</button>
                     : <span className="old">{e.oldDisplay}</span> → <span className="new">{e.newDisplay}</span>
                     <span className="history-path">{e.path}</span>
                   </li>

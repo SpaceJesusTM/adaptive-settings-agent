@@ -185,20 +185,49 @@ test.describe("B/D. Auto-staging, Adaptive Workspace, Pinned direct edits & Comp
     expect((profile.preferences[0] as { scope: string }).scope).toBe("session");
   });
 
-  test("detached ?view=workspace loads independently and synchronizes with main window", async ({ page, context }) => {
+  test("detached ?view=workspace loads independently, fills window height without footer bleed, and synchronizes game + proposals", async ({
+    page,
+    context,
+  }) => {
     await setup(page, { scenario: "fresh_install_comprehensive", condition: "adaptive", game: "valorant", aiMode: "fallback" });
     const detached = await context.newPage();
+    await detached.setViewportSize({ width: 1280, height: 800 });
     await detached.goto("/?view=workspace&game=valorant");
     await expect(detached.locator(".standalone-shell")).toBeVisible();
 
-    await detached.getByLabel("Message the assistant").fill("Help reduce input lag.");
+    await detached.getByLabel("Message the assistant").fill("Configure everything for competitive FPS and clarity.");
     await detached.getByRole("button", { name: "Send" }).click();
     await detached.locator(".msg-assistant").last().waitFor({ timeout: 30_000 });
     await expect(detached.locator(".aw-workspace .tray-item").first()).toBeVisible();
 
-    // Main window picks up the staged proposal automatically
+    // Workspace pane uses full window height instead of being capped at 42vh
+    const layoutMetrics = await detached.evaluate(() => {
+      const body = document.querySelector(".aw-workspace.is-standalone .tray-body") as HTMLElement;
+      const actions = document.querySelector(".aw-workspace.is-standalone .tray-actions") as HTMLElement;
+      const maxHeight = getComputedStyle(body).maxHeight;
+      body.scrollTop = Math.min(200, Math.max(0, body.scrollHeight - body.clientHeight));
+      const bodyRect = body.getBoundingClientRect();
+      const actionsRect = actions.getBoundingClientRect();
+      return {
+        maxHeight,
+        bodyHeight: bodyRect.height,
+        actionsBottom: actionsRect.bottom,
+        bodyBottom: bodyRect.bottom,
+      };
+    });
+    expect(layoutMetrics.maxHeight).toBe("none");
+    expect(layoutMetrics.bodyHeight).toBeGreaterThan(500);
+    expect(Math.abs(layoutMetrics.actionsBottom - layoutMetrics.bodyBottom)).toBeLessThanOrEqual(2);
+
+    // Switching game updates URL ?game= and persists across reload
+    await detached.getByRole("group", { name: "Game" }).getByRole("button", { name: "CS2" }).click();
+    await expect.poll(() => new URL(detached.url()).searchParams.get("game")).toBe("cs2");
+    await detached.reload();
+    await expect(detached.getByRole("group", { name: "Game" }).getByRole("button", { name: "CS2" })).toHaveAttribute("aria-pressed", "true");
+
+    // Main window picks up synchronized state
     await page.bringToFront();
-    await expect.poll(async () => (await page.getByRole("banner").getByRole("button", { name: /^Workspace/ }).textContent()) ?? "").toMatch(/\(\d+\)/);
+    await expect(page.getByRole("group", { name: "Game" }).getByRole("button", { name: "CS2" })).toHaveAttribute("aria-pressed", "true");
     await detached.close();
   });
 });

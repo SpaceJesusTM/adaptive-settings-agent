@@ -257,7 +257,8 @@ class ProposalService:
                     v = normalize_value(s, value, strict=False)  # user edit: snap like a manual control
                 except ValueError_ as exc:
                     raise Invalid(str(exc), code="invalid_value") from exc
-                conn.execute("UPDATE proposal_items SET edited_value_json = ?, status_reason = NULL WHERE id = ?", (dumps(v), item_id))
+                edited_json = None if values_equal(v, loads(it["proposed_value_json"])) else dumps(v)
+                conn.execute("UPDATE proposal_items SET edited_value_json = ?, status_reason = NULL WHERE id = ?", (edited_json, item_id))
                 conn.execute("UPDATE proposals SET updated_at = ? WHERE id = ?", (now_iso(), proposal_id))
             return self.view(conn, proposal_id)
         finally:

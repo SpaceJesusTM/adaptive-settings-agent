@@ -70,6 +70,16 @@ function readInitialExperimenterMode(): boolean {
   }
 }
 
+function syncWorkspaceUrlGame(game: GameId) {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  if (url.searchParams.get("view") !== "workspace") return;
+  if (url.searchParams.get("game") !== game) {
+    url.searchParams.set("game", game);
+    window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+  }
+}
+
 interface AppState {
   ready: boolean;
   fatal: string | null;
@@ -130,7 +140,7 @@ interface AppState {
   setAdaptation: (on: boolean) => Promise<void>;
   navigate: (game: GameId, tabId: string, subtabId?: string) => void;
   goToSetting: (game: GameId, settingId: string, reason: Highlight["reason"]) => void;
-  requestFocusInMainWindow: (game: GameId, settingId: string) => void;
+  requestFocusInMainWindow: (game: GameId, settingId: string, reason?: Highlight["reason"]) => void;
   displayValues: (game: GameId) => Record<string, Value>;
   changeSetting: (game: GameId, settingId: string, value: Value) => Promise<void>;
   changePinnedSetting: (game: GameId, settingId: string, value: Value, opts?: { forceOverridePendingVideo?: boolean }) => Promise<boolean>;
@@ -261,6 +271,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const params = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
       const paramGame = params?.get("game");
       const activeGame: GameId = paramGame === "cs2" || paramGame === "valorant" ? paramGame : session.selectedGame;
+      syncWorkspaceUrlGame(activeGame);
       set({ session: activeGame !== session.selectedGame ? { ...session, selectedGame: activeGame } : session, scenarios, contextTypes });
       await Promise.all(GAMES.map((g) => get().loadGame(g)));
       void get().loadCrosshairProfiles();
@@ -275,6 +286,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             if (msg.type === "state_changed") {
               void api.session().then((fresh) => {
                 set({ session: fresh });
+                syncWorkspaceUrlGame(fresh.selectedGame);
                 const targets = fresh.selectedGame && fresh.selectedGame !== msg.game
                   ? [msg.game, fresh.selectedGame]
                   : [msg.game];
@@ -430,6 +442,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   switchGame: async (game) => {
     const session = await api.updateSession({ selectedGame: game });
+    syncWorkspaceUrlGame(game);
     set({ session, highlight: null });
     await get().refreshState(game);
     await get().refreshAdaptive(game);
@@ -493,9 +506,21 @@ export const useAppStore = create<AppState>((set, get) => ({
     }, 60);
   },
 
-  requestFocusInMainWindow: (game, settingId) => {
+  requestFocusInMainWindow: (game, settingId, reason = "assistant") => {
     broadcastSync({ type: "navigate_setting", game, settingId });
-    get().goToSetting(game, settingId, "assistant");
+    const isDetached =
+      typeof window !== "undefined" && new URLSearchParams(window.location.search).get("view") === "workspace";
+    if (isDetached) {
+      try {
+        window.opener?.focus?.();
+      } catch {
+        // browsers may restrict cross-window focus
+      }
+      const label = get().byId[game]?.[settingId]?.exactLabel ?? "setting";
+      get().toast("info", `Highlighted ${label} in the main settings window.`);
+      return;
+    }
+    get().goToSetting(game, settingId, reason);
   },
 
   displayValues: (game) => {

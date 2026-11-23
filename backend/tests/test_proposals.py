@@ -118,6 +118,10 @@ def test_edit_item_then_apply_edited_value(services):
     p = stage(services, [{"settingId": "cs2.video.fps_max", "proposedValue": "240"}], game="cs2")
     view = services.proposals.edit_item(p["id"], p["items"][0]["id"], 300.3)
     assert view["items"][0]["editedValue"] == 300
+    reverted = services.proposals.edit_item(p["id"], p["items"][0]["id"], 240)
+    assert reverted["items"][0]["editedValue"] is None
+    view = services.proposals.edit_item(p["id"], p["items"][0]["id"], 300.3)
+    assert view["items"][0]["editedValue"] == 300
     services.proposals.apply(p["id"], [p["items"][0]["id"]], None)
     assert value_of(services, "cs2", "cs2.video.fps_max")["value"] == 300
 

@@ -60,6 +60,11 @@ function ItemRow({
             <span className="rec-to">{item.effectiveDisplay}</span>
           )}
           {item.editedValue !== null ? <span className="chip">edited by you</span> : null}
+          {JSON.stringify(item.effectiveValue) === JSON.stringify(item.baselineValue) ? (
+            <span className="chip chip-warn" title="This matches the current setting value, so applying it will make no change.">
+              matches current
+            </span>
+          ) : null}
         </div>
         {item.why ? <p className="tray-why">{item.why}</p> : null}
         {item.stale ? (
@@ -365,7 +370,7 @@ function PinnedWorkspaceTab({ game }: { game: GameId }) {
           return (
             <li key={id} className={`pinned-item ${av.disabledReason ? "is-disabled" : ""}`} data-pinned-id={id}>
               <div className="pinned-head">
-                <div>
+                <div className="tray-title">
                   <strong id={labelId}>{setting.exactLabel}</strong>
                   <span className="rec-path">{setting.canonicalPath}</span>
                 </div>
@@ -491,7 +496,7 @@ export function AdaptiveWorkspace({
   const detachedUrl = `?view=workspace&game=${game}`;
 
   const popOut = () => {
-    const win = window.open(detachedUrl, "csc2524-adaptive-workspace", "width=760,height=840");
+    const win = window.open(detachedUrl, "csc2524-adaptive-workspace", "width=1120,height=820");
     if (!win) setPopupBlocked(true);
     else setPopupBlocked(false);
   };

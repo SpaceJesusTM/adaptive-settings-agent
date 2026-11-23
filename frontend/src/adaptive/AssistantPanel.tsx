@@ -5,7 +5,7 @@ import { EMPTY, useAppStore } from "../store/useAppStore";
 import { ModelStatusPill } from "../components/chrome/StudyBar";
 import { Chat } from "./Chat";
 
-function PreferencesPanel({ game }: { game: GameId }) {
+export function PreferencesPanel({ game }: { game: GameId }) {
   const profile = useAppStore((s) => s.profile);
   const removePreference = useAppStore((s) => s.removePreference);
   const clearGoals = useAppStore((s) => s.clearGoals);
@@ -103,7 +103,7 @@ function PreferencesPanel({ game }: { game: GameId }) {
   );
 }
 
-function TracePanel() {
+export function TracePanel() {
   const traces = useAppStore((s) => s.traces);
   const load = useAppStore((s) => s.loadTraces);
   useEffect(() => {
