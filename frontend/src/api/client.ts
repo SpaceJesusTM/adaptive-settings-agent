@@ -12,6 +12,7 @@ import type {
   Profile,
   Proposal,
   RelevantNowSet,
+  RestageResult,
   RunStatus,
   ScenarioInfo,
   ScopeOverride,
@@ -84,6 +85,7 @@ export const api = {
     request<HistoryBatch>("POST", `/api/games/${game}/batch`, { changes, label, clientRequestId: newRequestId("bat") }),
   history: (game: GameId) => request<HistoryBatch[]>("GET", `/api/games/${game}/history`),
   undo: (batchId: string) => request<HistoryBatch>("POST", `/api/history/${batchId}/undo`, { clientRequestId: newRequestId("undo") }),
+  restageHistory: (batchId: string) => request<RestageResult>("POST", `/api/history/${batchId}/restage`),
   setPin: (game: GameId, settingId: string, on: boolean) =>
     request<{ pins: string[] }>("PUT", `/api/games/${game}/pins/${encodeURIComponent(settingId)}`, { on }),
   setLock: (game: GameId, settingId: string, on: boolean) =>
@@ -145,6 +147,10 @@ export const api = {
   refreshRelevantNow: (game: GameId) => request<RelevantNowSet>("POST", `/api/games/${game}/relevant-now/refresh`),
   dismissCard: (game: GameId, settingId: string, reason?: string) =>
     request<RelevantNowSet>("POST", `/api/games/${game}/relevant-now/dismiss`, { settingId, reason }),
+  markDiscoverChecked: (game: GameId, checkId: string) =>
+    request<RelevantNowSet>("POST", `/api/games/${game}/relevant-now/check`, { checkId }),
+  revisitOnboarding: (game: GameId) =>
+    request<RelevantNowSet>("POST", `/api/games/${game}/relevant-now/onboarding/revisit`),
   contextEventTypes: () => request<ContextEventType[]>("GET", "/api/context-events"),
   setContextEvent: (game: GameId, eventType: string | null) =>
     request<RelevantNowSet>("POST", "/api/context-events", { game, eventType }),
@@ -158,6 +164,15 @@ export const api = {
     note?: string;
   }) => request<{ id: string }>("POST", "/api/profile/preferences", body),
   removePreference: (id: string) => request<{ ok: boolean }>("DELETE", `/api/profile/preferences/${id}`),
+  addPersonalFact: (body: {
+    factKey: string;
+    valueText: string;
+    originGame?: GameId | null;
+    sourceSettingId?: string | null;
+    source: "user_explicit" | "chat_confirmed";
+    note?: string;
+  }) => request<{ id: string }>("POST", "/api/profile/personal-facts", body),
+  removePersonalFact: (id: string) => request<{ ok: boolean }>("DELETE", `/api/profile/personal-facts/${id}`),
   clearSessionGoals: (game: GameId) => request<{ ok: boolean }>("DELETE", `/api/games/${game}/session-goals`),
   scenarios: () => request<ScenarioInfo[]>("GET", "/api/admin/scenarios"),
   reset: (scenario: string, mode: "full" | "ai_only") =>

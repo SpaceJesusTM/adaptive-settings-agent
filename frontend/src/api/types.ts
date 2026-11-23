@@ -173,8 +173,24 @@ export interface HistoryEvent {
   newValue: Value;
   oldDisplay: string;
   newDisplay: string;
+  currentValue?: Value | null;
+  currentDisplay?: string | null;
   revisionAfter: number;
   stillCurrent: boolean;
+  why?: string | null;
+  tradeoff?: string | null;
+  basedOn?: string | null;
+  wasEditedByUser?: boolean;
+}
+
+export interface HistoryProvenance {
+  hasRecordedRationale: boolean;
+  userRequest: string | null;
+  runId: string | null;
+  model: string | null;
+  proposalTitle: string | null;
+  restagedFromBatchId: string | null;
+  planReason: string | null;
 }
 
 export interface HistoryBatch {
@@ -189,6 +205,9 @@ export interface HistoryBatch {
   undoesBatchId: string | null;
   undoneByBatchId: string | null;
   undoable: boolean;
+  superseded?: boolean;
+  supersededCount?: number;
+  provenance?: HistoryProvenance;
   events: HistoryEvent[];
   gameRevision: number;
   values: Record<string, ValueEntry>;
@@ -268,9 +287,33 @@ export interface PlanManualConsideration {
   path: string;
   category: string;
   currentDisplay: string;
+  dimension?: string | null;
+  dimensionLabel?: string | null;
+  why?: string | null;
   reason: string;
   whatItDoes: string;
   tradeoffs: string | null;
+}
+
+export interface PlanAlignedItem {
+  settingId: string;
+  label: string;
+  path: string;
+  category?: string;
+  currentDisplay: string;
+  dimension?: string | null;
+  dimensionLabel?: string | null;
+  why?: string | null;
+  whatItDoes?: string;
+  tradeoffs?: string | null;
+}
+
+export interface PlanStatusItem {
+  settingId: string;
+  label: string;
+  path: string;
+  currentDisplay?: string;
+  reason: string;
 }
 
 export interface PlanMetadata {
@@ -286,7 +329,11 @@ export interface PlanMetadata {
   partialCoverage: boolean;
   batchesCompleted: number;
   batchesTotal: number;
+  restagedFromBatchId?: string | null;
   coverage: PlanCoverage;
+  alreadyAlignedItems?: PlanAlignedItem[];
+  lockedItems?: PlanStatusItem[];
+  unavailableItems?: PlanStatusItem[];
   manualConsiderations: PlanManualConsideration[];
 }
 
@@ -302,7 +349,7 @@ export interface CrosshairProfile {
 export interface Proposal {
   id: string;
   game: GameId;
-  source: "ai" | "fallback" | "rules";
+  source: "ai" | "fallback" | "rules" | "history";
   sourceLabel: string;
   runId: string | null;
   title: string;
@@ -311,8 +358,19 @@ export interface Proposal {
   updatedAt: string;
   appliedBatchId: string | null;
   autoStaged?: boolean;
+  restagedFromBatchId?: string | null;
   plan?: PlanMetadata | null;
   items: ProposalItem[];
+}
+
+export interface RestageResult {
+  proposal: Proposal | null;
+  stagedCount: number;
+  alreadyAlignedItems: PlanAlignedItem[];
+  manualConsiderations: PlanManualConsideration[];
+  lockedItems: PlanStatusItem[];
+  unavailableItems: PlanStatusItem[];
+  message: string;
 }
 
 export interface Recommendation {
@@ -371,6 +429,46 @@ export interface Provenance {
   latencyMs?: number;
 }
 
+export interface CrossGameSettingRef {
+  settingId: string;
+  game: GameId;
+  label: string;
+  path: string;
+  controlType: ControlType;
+  aiProposable: boolean;
+  currentValue: Value;
+  currentDisplay: string;
+}
+
+export interface SensitivityConversionResult {
+  convertible: boolean;
+  confirmed?: boolean;
+  sourceGame: GameId;
+  targetGame: GameId;
+  sourceValue?: number;
+  convertedValue?: number;
+  formula?: string;
+  reason?: string;
+  assumptions: string[];
+  caveats: string[];
+}
+
+export interface CrossGameComparison {
+  id: string;
+  topic: string;
+  relationship: "direct_equivalent" | "similar_with_differences" | "loose_analogy" | "not_directly_comparable";
+  relationshipLabel: string;
+  summary: string;
+  differences: string;
+  safetyNote: string;
+  proposable: boolean;
+  valorantSettings: CrossGameSettingRef[];
+  cs2Settings: CrossGameSettingRef[];
+  confirmedFacts?: PersonalFact[];
+  targetNavigateId?: string | null;
+  sensitivityConversion?: SensitivityConversionResult;
+}
+
 export interface AssistantResponse {
   intent: string;
   reply: string;
@@ -389,6 +487,7 @@ export interface AssistantResponse {
   stagedCount?: number;
   alreadyPendingCount?: number;
   plan?: PlanMetadata | null;
+  crossGameComparisons?: CrossGameComparison[];
 }
 
 export interface ChatMessage {
@@ -421,6 +520,10 @@ export interface RunStatus {
 
 export interface RelevantCard {
   cardId: string;
+  kind?: "change" | "inspect";
+  triggerGroup?: "onboarding" | "context_event" | "followup" | "goal_or_preference";
+  triggerLabel?: string;
+  checkId?: string;
   settingId: string;
   label: string;
   path: string;
@@ -454,6 +557,8 @@ export interface RelevantNowSet {
   updateAvailable: boolean;
   hasEvidence?: boolean;
   disabled?: boolean;
+  onboardingStatus?: "active" | "completed" | "dismissed" | null;
+  canRevisitOnboarding?: boolean;
   context?: { id: string; eventType: string; label: string; dimensions: string[]; simulated: boolean } | null;
 }
 
@@ -471,6 +576,35 @@ export interface Preference {
   evidence: { kind: string; game: string | null; setting_id: string | null; detail: string | null; created_at: string }[];
 }
 
+export interface PersonalFact {
+  id: string;
+  factKey: string;
+  label: string;
+  valueText: string;
+  originGame: GameId | null;
+  sourceSettingId: string | null;
+  source: string;
+  note: string | null;
+  createdAt: string;
+}
+
+export interface PersonalFactType {
+  id: string;
+  label: string;
+  description: string;
+  placeholder: string;
+}
+
+export interface GoalPreferenceConflict {
+  goalDimension: string;
+  goalDimensionLabel: string;
+  preferenceId: string;
+  preferenceLabel: string;
+  preferenceDirection: string;
+  scope: string;
+  explanation: string;
+}
+
 export interface SessionGoal {
   id: string;
   text: string;
@@ -481,7 +615,10 @@ export interface SessionGoal {
 
 export interface Profile {
   preferences: Preference[];
+  personalFacts?: PersonalFact[];
+  personalFactTypes?: PersonalFactType[];
   sessionGoals: Record<GameId, SessionGoal[]>;
+  conflicts?: Record<GameId, GoalPreferenceConflict[]>;
   context: Record<GameId, RelevantNowSet["context"]>;
   evidence: { id: string; kind: string; dimension: string | null; game: string | null; detail: string | null; created_at: string }[];
   dimensions: { id: string; label: string }[];

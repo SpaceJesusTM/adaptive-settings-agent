@@ -1,11 +1,21 @@
 import { useState } from "react";
 import type { GameId, RelevantCard } from "../api/types";
+import { gameName } from "../lib/format";
 import { EMPTY, useAppStore } from "../store/useAppStore";
 import { RecommendationCard, type CardModel } from "./RecommendationCard";
 
-function toCard(c: RelevantCard): CardModel {
+function toCard(c: RelevantCard, experimenterMode: boolean): CardModel {
+  const originText = experimenterMode
+    ? c.whyBasis === "official"
+      ? "rule-based; official game documentation"
+      : "rule-based; editorial match"
+    : c.kind === "inspect"
+      ? "optional setup check based on your profile"
+      : "suggestion grounded in game documentation";
   return {
     key: c.cardId,
+    kind: c.kind ?? "change",
+    triggerLabel: c.triggerLabel,
     label: c.label,
     path: c.path,
     from: c.currentDisplay,
@@ -13,7 +23,7 @@ function toCard(c: RelevantCard): CardModel {
     whatItDoes: c.whatItDoes,
     whatItDoesSource: c.whatItDoesSource,
     why: c.why,
-    whyOrigin: c.whyBasis === "official" ? "rule-based; reason from official game documentation" : "rule-based; editorial reason",
+    whyOrigin: originText,
     tradeoff: c.tradeoff,
     basedOn: c.basedOn,
     crossGame: c.crossGame,
@@ -25,7 +35,14 @@ function toCard(c: RelevantCard): CardModel {
   };
 }
 
-const DISMISS_REASONS = ["Not relevant to me", "Already tried it", "I prefer my current value"];
+const DISMISS_REASONS = ["Not relevant to me", "Already checked it", "I prefer my current value"];
+
+const GROUP_ORDER: { key: NonNullable<RelevantCard["triggerGroup"]>; label: (game: GameId) => string }[] = [
+  { key: "context_event", label: () => "Responding to a simulated event" },
+  { key: "followup", label: () => "Something worth checking after your recent change" },
+  { key: "onboarding", label: (g) => `Getting started in ${gameName(g)}` },
+  { key: "goal_or_preference", label: () => "Based on your goals & saved priorities" },
+];
 
 export function RelevantNow({ game }: { game: GameId }) {
   const rn = useAppStore((s) => s.relevantNow[game]);
@@ -33,21 +50,40 @@ export function RelevantNow({ game }: { game: GameId }) {
   const setCardOpen = useAppStore((s) => s.setCardOpen);
   const refresh = useAppStore((s) => s.refreshRelevantNow);
   const dismiss = useAppStore((s) => s.dismissCard);
+  const markChecked = useAppStore((s) => s.markDiscoverChecked);
+  const revisitOnboarding = useAppStore((s) => s.revisitOnboarding);
   const stage = useAppStore((s) => s.stage);
   const requestFocus = useAppStore((s) => s.requestFocusInMainWindow);
   const togglePin = useAppStore((s) => s.togglePin);
+  const experimenterMode = useAppStore((s) => s.experimenterMode);
   const pins = useAppStore((s) => s.states[game]?.pins ?? EMPTY);
   const triggerContext = useAppStore((s) => s.triggerContext);
   const [dismissing, setDismissing] = useState<string | null>(null);
-  const anyOpen = (rn?.items ?? []).some((c) => openCards[c.cardId]);
+  const items = rn?.items ?? [];
+  const anyOpen = items.some((c) => openCards[c.cardId]);
+
+  const groups = GROUP_ORDER.map((g) => ({
+    ...g,
+    title: g.label(game),
+    cards: items.filter((c) => (c.triggerGroup ?? "goal_or_preference") === g.key),
+  })).filter((g) => g.cards.length > 0);
 
   return (
     <section className="rn" aria-label="Discover suggestions">
       <header className="rn-head">
-        <span className="rn-title">
-          Discover <span className="rn-count">{(rn?.items ?? []).filter((c) => c.state === "suggested").length}</span>
+        <div className="rn-head-top">
+          <span className="rn-title">
+            Discover <span className="rn-count">{items.filter((c) => c.state === "suggested").length}</span>
+          </span>
+          {rn?.canRevisitOnboarding ? (
+            <button type="button" className="link rn-revisit" onClick={() => void revisitOnboarding(game)}>
+              Revisit first-time checks
+            </button>
+          ) : null}
+        </div>
+        <span className="rn-sub">
+          Timely controls worth inspecting based on onboarding, recent changes, context, or priorities — nothing changes until you act.
         </span>
-        <span className="rn-sub">Unsolicited suggestions from your goals and saved preferences — never added to Changes until you prepare them.</span>
       </header>
       {rn?.context ? (
         <div className="rn-context" role="note">
@@ -60,7 +96,7 @@ export function RelevantNow({ game }: { game: GameId }) {
       {rn?.disabled ? <p className="rn-empty">Proactive Discover suggestions are switched off (Study controls → Adaptation).</p> : null}
       {rn?.updateAvailable ? (
         <div className="rn-update">
-          <span>New suggestions are available based on newer goals or preferences.</span>
+          <span>New Discover items are available based on your latest goals, priorities, or changes.</span>
           <button
             type="button"
             className="btn btn-small"
@@ -72,58 +108,64 @@ export function RelevantNow({ game }: { game: GameId }) {
           </button>
         </div>
       ) : null}
-      {!rn?.disabled && (rn?.items ?? []).length === 0 ? (
+      {!rn?.disabled && items.length === 0 ? (
         <p className="rn-empty">
           {rn?.updateAvailable
-            ? "Refresh to see suggestions for your current goals."
+            ? "Click Refresh above to view newly relevant suggestions."
             : rn?.hasEvidence
-              ? "Your current settings already match your goals (or the relevant settings are locked or queued in Changes)."
-              : "No proactive suggestions yet. Describe a goal in chat or save a preference to see relevant settings."}
+              ? "Nothing pending right now — your current settings align with your active priorities."
+              : "No proactive checks pending. Ask the assistant about a goal or confirm preferences to surface relevant controls."}
         </p>
       ) : null}
-      <div className="rn-cards">
-        {(rn?.items ?? []).map((c) => {
-          const isPinned = pins.includes(c.settingId);
-          return (
-            <div key={c.cardId} className="rn-card-wrap">
-              <RecommendationCard
-                card={toCard(c)}
-                open={Boolean(openCards[c.cardId])}
-                onToggle={(o) => setCardOpen(c.cardId, o)}
-                onShow={() => requestFocus(game, c.settingId)}
-                onStage={() => void stage(game, [c], "rules", null, `Discover: ${c.label}`)}
-                onDismiss={() => setDismissing(c.cardId)}
-                extraActions={
-                  <button type="button" className="btn btn-small btn-ghost" onClick={() => void togglePin(game, c.settingId)}>
-                    {isPinned ? "Unpin" : "Pin"}
-                  </button>
-                }
-              />
-              {dismissing === c.cardId ? (
-                <div className="dismiss-box" role="group" aria-label={`Why dismiss ${c.label}?`}>
-                  <span>Why dismiss? (It will not reappear unless your goals change.)</span>
-                  {DISMISS_REASONS.map((r) => (
-                    <button
-                      key={r}
-                      type="button"
-                      className="btn btn-small"
-                      onClick={() => {
-                        void dismiss(game, c.settingId, r);
-                        setDismissing(null);
-                      }}
-                    >
-                      {r}
-                    </button>
-                  ))}
-                  <button type="button" className="btn btn-small btn-ghost" onClick={() => setDismissing(null)}>
-                    Cancel
-                  </button>
+      {groups.map((grp) => (
+        <div key={grp.key} className="rn-group">
+          <h4 className="rn-group-title">{grp.title}</h4>
+          <div className="rn-cards">
+            {grp.cards.map((c) => {
+              const isPinned = pins.includes(c.settingId);
+              return (
+                <div key={c.cardId} className="rn-card-wrap">
+                  <RecommendationCard
+                    card={toCard(c, experimenterMode)}
+                    open={Boolean(openCards[c.cardId])}
+                    onToggle={(o) => setCardOpen(c.cardId, o)}
+                    onShow={() => requestFocus(game, c.settingId)}
+                    onStage={c.kind === "inspect" ? undefined : () => void stage(game, [c], "rules", null, `Discover: ${c.label}`)}
+                    onMarkChecked={c.kind === "inspect" || c.checkId ? () => void markChecked(game, c.checkId ?? c.cardId) : undefined}
+                    onDismiss={() => setDismissing(c.cardId)}
+                    extraActions={
+                      <button type="button" className="btn btn-small btn-ghost" onClick={() => void togglePin(game, c.settingId)}>
+                        {isPinned ? "Unpin" : "Pin"}
+                      </button>
+                    }
+                  />
+                  {dismissing === c.cardId ? (
+                    <div className="dismiss-box" role="group" aria-label={`Why dismiss ${c.label}?`}>
+                      <span>Why dismiss? (Suppressed until your priorities change.)</span>
+                      {DISMISS_REASONS.map((r) => (
+                        <button
+                          key={r}
+                          type="button"
+                          className="btn btn-small"
+                          onClick={() => {
+                            void dismiss(game, c.settingId, r);
+                            setDismissing(null);
+                          }}
+                        >
+                          {r}
+                        </button>
+                      ))}
+                      <button type="button" className="btn btn-small btn-ghost" onClick={() => setDismissing(null)}>
+                        Cancel
+                      </button>
+                    </div>
+                  ) : null}
                 </div>
-              ) : null}
-            </div>
-          );
-        })}
-      </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
     </section>
   );
 }

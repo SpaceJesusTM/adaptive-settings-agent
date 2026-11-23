@@ -31,6 +31,7 @@ export function App() {
   const ready = useAppStore((s) => s.ready);
   const fatal = useAppStore((s) => s.fatal);
   const session = useAppStore((s) => s.session);
+  const detachedWorkspaceActive = useAppStore((s) => s.detachedWorkspaceActive);
   const init = useAppStore((s) => s.init);
 
   useEffect(() => {
@@ -61,14 +62,15 @@ export function App() {
 
   const game = session.selectedGame;
   const adaptive = session.condition === "adaptive";
+  const showDockedAdaptive = adaptive && !detachedWorkspaceActive;
   return (
     <div className={`app game-${game} ${adaptive ? "cond-adaptive" : "cond-baseline"}`} data-condition={session.condition} data-game={game}>
       <StudyBar />
       <main className="workspace">
         <GameSurface game={game} />
-        {adaptive ? <AssistantPanel game={game} /> : null}
+        {showDockedAdaptive ? <AssistantPanel game={game} /> : null}
       </main>
-      {adaptive ? <AdaptiveWorkspace game={game} mode="docked" /> : null}
+      {showDockedAdaptive ? <AdaptiveWorkspace game={game} mode="docked" /> : null}
       <HistoryDrawer />
       <Toasts />
     </div>

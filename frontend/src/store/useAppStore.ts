@@ -26,7 +26,7 @@ import type {
 } from "../api/types";
 import { derivePreset } from "../lib/availability";
 import { displayValue, rowDomId, sameValue } from "../lib/format";
-import { broadcastSync, subscribeSync } from "../lib/sync";
+import { broadcastSync, clearDetachedLease, isDetachedLeaseAlive, subscribeSync } from "../lib/sync";
 
 export const GAMES: GameId[] = ["valorant", "cs2"];
 
@@ -107,6 +107,7 @@ interface AppState {
   workspaceOpen: boolean;
   workspaceTab: WorkspaceTab;
   trayOpen: boolean;
+  detachedWorkspaceActive: boolean;
   experimenterMode: boolean;
   scopeOverride: ScopeOverride;
   openCards: Record<string, boolean>;
@@ -152,6 +153,7 @@ interface AppState {
   loadHistory: (game: GameId) => Promise<void>;
   undo: (batch: HistoryBatch) => Promise<void>;
   undoById: (game: GameId, batchId: string) => Promise<void>;
+  restageHistoryBatch: (batch: HistoryBatch) => Promise<void>;
   togglePin: (game: GameId, settingId: string) => Promise<void>;
   toggleLock: (game: GameId, settingId: string) => Promise<void>;
   stage: (game: GameId, recs: Recommendation[] | RelevantCard[], source: "ai" | "fallback" | "rules", runId: string | null, title: string) => Promise<void>;
@@ -164,20 +166,29 @@ interface AppState {
   clearChat: (game: GameId) => Promise<void>;
   refreshRelevantNow: (game: GameId) => Promise<void>;
   dismissCard: (game: GameId, settingId: string, reason?: string) => Promise<void>;
+  markDiscoverChecked: (game: GameId, checkId: string) => Promise<void>;
+  revisitOnboarding: (game: GameId) => Promise<void>;
   setCardOpen: (cardId: string, open: boolean) => void;
   triggerContext: (game: GameId, eventType: string | null) => Promise<void>;
   loadProfile: () => Promise<void>;
   confirmPreference: (s: PreferenceSuggestion, scope: "session" | "durable", dimension?: string) => Promise<boolean>;
   addPreference: (game: GameId, dimension: string, direction: "prioritize" | "deprioritize", scope: "session" | "durable", note?: string) => Promise<void>;
   removePreference: (id: string) => Promise<void>;
+  addPersonalFact: (game: GameId, factKey: string, valueText: string, sourceSettingId?: string, note?: string) => Promise<void>;
+  removePersonalFact: (id: string) => Promise<void>;
   clearGoals: (game: GameId) => Promise<void>;
   loadTraces: () => Promise<void>;
   reset: (scenario: string, mode: "full" | "ai_only") => Promise<void>;
+  popOutWorkspace: (game: GameId) => boolean;
+  focusDetachedWorkspace: () => void;
+  recallDetachedWorkspace: () => Promise<void>;
 }
 
 let toastSeq = 1;
 let highlightSeq = 1;
 let syncUnsubscribe: (() => void) | null = null;
+let detachedMonitorTimer: number | null = null;
+let detachedWindowRef: Window | null = null;
 
 /** Values as currently shown in the menu: stored values + unapplied explicit edits + derived presets. */
 export function computeDisplayValues(
@@ -234,6 +245,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   workspaceOpen: false,
   workspaceTab: "changes",
   trayOpen: false,
+  detachedWorkspaceActive: false,
   experimenterMode: readInitialExperimenterMode(),
   scopeOverride: "auto",
   openCards: {},
@@ -281,6 +293,30 @@ export const useAppStore = create<AppState>((set, get) => ({
         await get().refreshAdaptive(activeGame);
       }
       if (!syncUnsubscribe && typeof window !== "undefined") {
+        const isSelfDetached = new URLSearchParams(window.location.search).get("view") === "workspace";
+        if (!isSelfDetached && isDetachedLeaseAlive()) {
+          set({ detachedWorkspaceActive: true });
+          broadcastSync({ type: "workspace_ping" });
+        }
+        const ensureMonitor = () => {
+          if (detachedMonitorTimer !== null || isSelfDetached) return;
+          detachedMonitorTimer = window.setInterval(() => {
+            if (!get().detachedWorkspaceActive) return;
+            const refClosed = detachedWindowRef !== null && detachedWindowRef.closed;
+            if (refClosed || (!isDetachedLeaseAlive() && detachedWindowRef === null)) {
+              detachedWindowRef = null;
+              clearDetachedLease();
+              set({ detachedWorkspaceActive: false });
+              const cur = get().session?.selectedGame;
+              if (cur) {
+                void get().refreshState(cur);
+                if (get().session?.condition === "adaptive") void get().refreshAdaptive(cur);
+              }
+            }
+          }, 1200);
+        };
+        if (!isSelfDetached) ensureMonitor();
+
         syncUnsubscribe = subscribeSync(
           (msg) => {
             if (msg.type === "state_changed") {
@@ -302,6 +338,26 @@ export const useAppStore = create<AppState>((set, get) => ({
                 get().goToSetting(msg.game, msg.settingId, "assistant");
                 window.focus();
               }
+            } else if (msg.type === "open_workspace_tab") {
+              set({ workspaceTab: msg.tab, workspaceOpen: true, trayOpen: true });
+              if (msg.game) void get().refreshAdaptive(msg.game);
+            } else if (msg.type === "workspace_attached" || msg.type === "workspace_heartbeat") {
+              if (!isSelfDetached) {
+                if (!get().detachedWorkspaceActive) {
+                  set({ detachedWorkspaceActive: true });
+                }
+                ensureMonitor();
+              }
+            } else if (msg.type === "workspace_closed") {
+              if (!isSelfDetached && get().detachedWorkspaceActive) {
+                detachedWindowRef = null;
+                set({ detachedWorkspaceActive: false });
+                const cur = get().session?.selectedGame;
+                if (cur) {
+                  void get().refreshState(cur);
+                  if (get().session?.condition === "adaptive") void get().refreshAdaptive(cur);
+                }
+              }
             }
           },
           () => {
@@ -310,6 +366,10 @@ export const useAppStore = create<AppState>((set, get) => ({
               void get().refreshState(cur);
               if (get().session?.condition === "adaptive") void get().refreshAdaptive(cur);
               if (cur === "valorant") void get().loadCrosshairProfiles();
+            }
+            if (!isSelfDetached && get().detachedWorkspaceActive && !isDetachedLeaseAlive() && (!detachedWindowRef || detachedWindowRef.closed)) {
+              detachedWindowRef = null;
+              set({ detachedWorkspaceActive: false });
             }
           },
         );
@@ -711,6 +771,25 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (game === "valorant") void get().loadCrosshairProfiles();
   },
 
+  restageHistoryBatch: async (batch) => {
+    try {
+      const res = await api.restageHistory(batch.batchId);
+      await get().refreshAdaptive(batch.game);
+      if (res.stagedCount > 0) {
+        set({ workspaceOpen: true, trayOpen: true, workspaceTab: "changes", historyOpen: false });
+        if (get().detachedWorkspaceActive) {
+          broadcastSync({ type: "open_workspace_tab", tab: "changes", game: batch.game });
+        }
+        get().toast("info", res.message);
+      } else {
+        get().toast("info", res.message);
+      }
+      broadcastSync({ type: "state_changed", game: batch.game });
+    } catch (err) {
+      get().toast("error", errText(err));
+    }
+  },
+
   togglePin: async (game, settingId) => {
     const pinned = get().states[game]?.pins.includes(settingId) ?? false;
     try {
@@ -889,6 +968,26 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
+  markDiscoverChecked: async (game, checkId) => {
+    try {
+      const rn = await api.markDiscoverChecked(game, checkId);
+      set((s) => ({ relevantNow: { ...s.relevantNow, [game]: rn } }));
+      broadcastSync({ type: "state_changed", game });
+    } catch (err) {
+      get().toast("error", errText(err));
+    }
+  },
+
+  revisitOnboarding: async (game) => {
+    try {
+      const rn = await api.revisitOnboarding(game);
+      set((s) => ({ relevantNow: { ...s.relevantNow, [game]: rn }, openCards: {} }));
+      broadcastSync({ type: "state_changed", game });
+    } catch (err) {
+      get().toast("error", errText(err));
+    }
+  },
+
   setCardOpen: (cardId, open) => set((s) => ({ openCards: { ...s.openCards, [cardId]: open } })),
 
   triggerContext: async (game, eventType) => {
@@ -936,6 +1035,33 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
+  addPersonalFact: async (game, factKey, valueText, sourceSettingId, note) => {
+    try {
+      await api.addPersonalFact({
+        factKey,
+        valueText,
+        originGame: game,
+        sourceSettingId,
+        source: "user_explicit",
+        note,
+      });
+      await get().refreshAdaptive(game);
+      broadcastSync({ type: "state_changed", game });
+      get().toast("success", "Saved personal setup preference.");
+    } catch (err) {
+      get().toast("error", errText(err));
+    }
+  },
+
+  removePersonalFact: async (id) => {
+    await api.removePersonalFact(id);
+    const game = get().session?.selectedGame;
+    if (game) {
+      await get().refreshAdaptive(game);
+      broadcastSync({ type: "state_changed", game });
+    }
+  },
+
   clearGoals: async (game) => {
     await api.clearSessionGoals(game);
     await get().refreshAdaptive(game);
@@ -965,6 +1091,45 @@ export const useAppStore = create<AppState>((set, get) => ({
       get().toast("success", `Reset to “${scenario}” (${mode === "full" ? "full experimental state" : "AI session state only"}). Backup saved.`);
     } catch (err) {
       get().toast("error", errText(err));
+    }
+  },
+
+  popOutWorkspace: (game) => {
+    const url = `?view=workspace&game=${game}`;
+    const win = window.open(url, "csc2524-adaptive-workspace", "width=1120,height=820");
+    if (!win) {
+      get().toast("warning", "Pop-up blocked — use 'Open in new tab ↗' or allow pop-ups.");
+      return false;
+    }
+    detachedWindowRef = win;
+    set({ detachedWorkspaceActive: true });
+    win.focus?.();
+    return true;
+  },
+
+  focusDetachedWorkspace: () => {
+    try {
+      detachedWindowRef?.focus?.();
+    } catch {
+      // ignore focus restrictions
+    }
+    broadcastSync({ type: "workspace_focus_request" });
+  },
+
+  recallDetachedWorkspace: async () => {
+    clearDetachedLease();
+    broadcastSync({ type: "workspace_recall" });
+    try {
+      detachedWindowRef?.close?.();
+    } catch {
+      // ignore close restrictions
+    }
+    detachedWindowRef = null;
+    set({ detachedWorkspaceActive: false });
+    const cur = get().session?.selectedGame;
+    if (cur) {
+      await get().refreshState(cur);
+      if (get().session?.condition === "adaptive") await get().refreshAdaptive(cur);
     }
   },
 }));

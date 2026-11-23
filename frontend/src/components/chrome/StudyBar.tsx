@@ -65,6 +65,9 @@ export function StudyBar() {
   const workspaceOpen = useAppStore((s) => s.workspaceOpen);
   const openWorkspace = useAppStore((s) => s.openWorkspace);
   const setWorkspaceOpen = useAppStore((s) => s.setWorkspaceOpen);
+  const detachedWorkspaceActive = useAppStore((s) => s.detachedWorkspaceActive);
+  const focusDetachedWorkspace = useAppStore((s) => s.focusDetachedWorkspace);
+  const recallDetachedWorkspace = useAppStore((s) => s.recallDetachedWorkspace);
   const proposals = useAppStore((s) => s.proposals[session.selectedGame] ?? EMPTY);
   const [controlsOpen, setControlsOpen] = useState(false);
 
@@ -124,14 +127,28 @@ export function StudyBar() {
       </button>
 
       {adaptive ? (
-        <button
-          type="button"
-          className={`sb-btn ${pendingCount ? "is-accent" : ""}`}
-          aria-expanded={workspaceOpen}
-          onClick={() => (workspaceOpen ? setWorkspaceOpen(false) : openWorkspace("changes"))}
-        >
-          Workspace{pendingCount ? ` (${pendingCount})` : ""}
-        </button>
+        detachedWorkspaceActive ? (
+          <div className="sb-detached-group" role="status" aria-label="Workspace relocated to detached window">
+            <span className="sb-detached-pill">
+              Workspace popped out{pendingCount ? ` (${pendingCount})` : ""}
+            </span>
+            <button type="button" className="sb-btn is-accent" onClick={focusDetachedWorkspace} title="Bring detached workspace window to front">
+              Focus
+            </button>
+            <button type="button" className="sb-btn" onClick={() => void recallDetachedWorkspace()} title="Close detached view and restore assistant and workspace here">
+              Dock here
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            className={`sb-btn ${pendingCount ? "is-accent" : ""}`}
+            aria-expanded={workspaceOpen}
+            onClick={() => (workspaceOpen ? setWorkspaceOpen(false) : openWorkspace("changes"))}
+          >
+            Workspace{pendingCount ? ` (${pendingCount})` : ""}
+          </button>
+        )
       ) : null}
 
       {adaptive && !experimenterMode ? <ModelStatusPill compact /> : null}

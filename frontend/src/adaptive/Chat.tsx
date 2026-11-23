@@ -237,6 +237,108 @@ function AssistantMessage({ game, msg }: { game: GameId; msg: ChatMessage }) {
         </div>
       ) : null}
 
+      {res.recommendations.length === 0 &&
+      res.plan &&
+      (res.intent === "recommend" || res.plan.singleSettingHint) &&
+      ((res.plan.alreadyAlignedItems?.length ?? 0) > 0 || (res.plan.manualConsiderations?.length ?? 0) > 0) ? (
+        <div className="msg-aligned-box" aria-label="Configuration review">
+          <strong className="layer-label">No changes needed to apply</strong>
+          {res.plan.alreadyAlignedItems?.length ? (
+            <ul className="review-info-list">
+              {res.plan.alreadyAlignedItems.slice(0, 5).map((a) => (
+                <li key={a.settingId} className="review-info-item">
+                  <div>
+                    <strong>{a.label}</strong> <span className="chip">Already {a.currentDisplay}</span>
+                    {a.why ? <span className="review-info-why"> — {a.why}</span> : null}
+                  </div>
+                  <button type="button" className="link" onClick={() => requestFocus(game, a.settingId)}>
+                    Show in settings
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {res.plan.manualConsiderations?.length ? (
+            <ul className="review-info-list">
+              {res.plan.manualConsiderations.slice(0, 3).map((m) => (
+                <li key={m.settingId} className="review-info-item">
+                  <div>
+                    <strong>{m.label}</strong> <span className="chip">Manual: {m.currentDisplay}</span>
+                    <span className="review-info-why"> — {m.reason}</span>
+                  </div>
+                  <button type="button" className="link" onClick={() => requestFocus(game, m.settingId)}>
+                    Show in settings
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
+
+      {res.crossGameComparisons?.length ? (
+        <div className="cg-list" aria-label="Cross-game comparisons">
+          {res.crossGameComparisons.map((c) => (
+            <div key={c.id} className="cg-card">
+              <div className="cg-head">
+                <strong>{c.topic}</strong>
+                <span className="chip">{c.relationshipLabel}</span>
+              </div>
+              <p className="cg-summary">{c.summary}</p>
+              <div className="cg-cols">
+                {c.valorantSettings.length ? (
+                  <div className="cg-col">
+                    <span className="layer-label">VALORANT</span>
+                    <ul>
+                      {c.valorantSettings.map((s) => (
+                        <li key={s.settingId}>
+                          {s.label}: <strong>{s.currentDisplay}</strong>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+                {c.cs2Settings.length ? (
+                  <div className="cg-col">
+                    <span className="layer-label">CS2</span>
+                    <ul>
+                      {c.cs2Settings.map((s) => (
+                        <li key={s.settingId}>
+                          {s.label}: <strong>{s.currentDisplay}</strong>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </div>
+              {c.sensitivityConversion ? (
+                <div className="cg-sens-note">
+                  {c.sensitivityConversion.convertible ? (
+                    <>
+                      <strong>360° hipfire estimate:</strong> {c.sensitivityConversion.formula}
+                      <ul>
+                        {c.sensitivityConversion.caveats.map((cv) => (
+                          <li key={cv}>{cv}</li>
+                        ))}
+                      </ul>
+                    </>
+                  ) : (
+                    <span>{c.sensitivityConversion.reason}</span>
+                  )}
+                </div>
+              ) : null}
+              <p className="cg-diff">{c.differences}</p>
+              <p className="cg-safety">{c.safetyNote}</p>
+              {c.targetNavigateId ? (
+                <button type="button" className="btn btn-small" onClick={() => requestFocus(game, c.targetNavigateId!)}>
+                  Show in settings
+                </button>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
+
       {res.explanations.map((e) => (
         <div key={e.settingId} className="explain-card">
           <div className="rec-title">

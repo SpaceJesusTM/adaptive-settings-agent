@@ -130,6 +130,7 @@ function ItemRow({
 function ProposalBlock({ proposal }: { proposal: Proposal }) {
   const apply = useAppStore((s) => s.applyProposal);
   const reject = useAppStore((s) => s.rejectProposal);
+  const requestFocus = useAppStore((s) => s.requestFocusInMainWindow);
   const byId = useAppStore((s) => s.byId[proposal.game] ?? EMPTY_MAP);
   const pendingVideo = useAppStore((s) => s.pendingVideo[proposal.game] ?? EMPTY_MAP);
   const experimenterMode = useAppStore((s) => s.experimenterMode);
@@ -138,6 +139,7 @@ function ProposalBlock({ proposal }: { proposal: Proposal }) {
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState(false);
   const [showPlanDetails, setShowPlanDetails] = useState(false);
+  const [showAligned, setShowAligned] = useState(false);
   const [videoConfirm, setVideoConfirm] = useState(false);
 
   useEffect(() => {
@@ -195,14 +197,17 @@ function ProposalBlock({ proposal }: { proposal: Proposal }) {
       ? proposal.sourceLabel
       : proposal.source === "fallback"
         ? "Basic offline suggestions (not AI)"
-        : "Assistant draft";
+        : proposal.source === "history"
+          ? "Restaged from history"
+          : "Assistant draft";
 
   return (
     <div className="tray-proposal" aria-label={proposal.title}>
       <header className="tray-phead">
         <span className={`prov-badge prov-${proposal.source}`}>{sourceBadge}</span>
         <strong>{proposal.title}</strong>
-        <span className="tray-meta-count">{pending.length} pending</span>
+        <span className="tray-meta-count">{pending.length} recommended change{pending.length === 1 ? "" : "s"}</span>
+        {proposal.restagedFromBatchId ? <span className="chip">Editable draft</span> : null}
         <time dateTime={proposal.createdAt}>{timeAgo(proposal.createdAt)}</time>
         {sections.length > 1 || selectable.length > 3 ? (
           <div className="tray-bulk">
@@ -288,6 +293,95 @@ function ProposalBlock({ proposal }: { proposal: Proposal }) {
           );
         })}
       </div>
+
+      {proposal.plan &&
+      ((proposal.plan.alreadyAlignedItems?.length ?? 0) > 0 ||
+        (proposal.plan.manualConsiderations?.length ?? 0) > 0 ||
+        (proposal.plan.lockedItems?.length ?? 0) > 0 ||
+        (proposal.plan.unavailableItems?.length ?? 0) > 0) ? (
+        <div className="tray-review-extras" aria-label="Additional relevant settings (informational, not part of Apply)">
+          {(proposal.plan.alreadyAlignedItems?.length ?? 0) > 0 ? (
+            <div className="review-group">
+              <div className="review-group-head">
+                <strong>Already aligned ({proposal.plan.alreadyAlignedItems!.length})</strong>
+                <span className="muted">Already match your goal — no change needed</span>
+                <button type="button" className="link" aria-expanded={showAligned} onClick={() => setShowAligned((v) => !v)}>
+                  {showAligned ? "Hide list" : "Show list"}
+                </button>
+              </div>
+              {showAligned ? (
+                <ul className="review-info-list">
+                  {proposal.plan.alreadyAlignedItems!.map((a) => (
+                    <li key={a.settingId} className="review-info-item">
+                      <div>
+                        <strong>{a.label}</strong> <span className="chip">Already {a.currentDisplay}</span>
+                        {a.why ? <span className="review-info-why"> — {a.why}</span> : null}
+                      </div>
+                      <button type="button" className="link" onClick={() => requestFocus(proposal.game, a.settingId)}>
+                        Show in settings
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
+
+          {(proposal.plan.manualConsiderations?.length ?? 0) > 0 ? (
+            <div className="review-group">
+              <div className="review-group-head">
+                <strong>Needs your decision ({proposal.plan.manualConsiderations.length})</strong>
+                <span className="muted">Personal or hardware controls — never changed automatically</span>
+              </div>
+              <ul className="review-info-list">
+                {proposal.plan.manualConsiderations.slice(0, 6).map((m) => (
+                  <li key={m.settingId} className="review-info-item">
+                    <div>
+                      <strong>{m.label}</strong> <span className="chip">{m.currentDisplay}</span>
+                      <span className="review-info-why"> — {m.reason}</span>
+                    </div>
+                    <button type="button" className="link" onClick={() => requestFocus(proposal.game, m.settingId)}>
+                      Show in settings
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
+          {(proposal.plan.lockedItems?.length ?? 0) > 0 || (proposal.plan.unavailableItems?.length ?? 0) > 0 ? (
+            <div className="review-group">
+              <div className="review-group-head">
+                <strong>Locked or unavailable</strong>
+              </div>
+              <ul className="review-info-list">
+                {(proposal.plan.lockedItems ?? []).map((l) => (
+                  <li key={l.settingId} className="review-info-item">
+                    <div>
+                      <strong>{l.label}</strong> <span className="chip">Locked</span>
+                      <span className="review-info-why"> — {l.reason}</span>
+                    </div>
+                    <button type="button" className="link" onClick={() => requestFocus(proposal.game, l.settingId)}>
+                      Show in settings
+                    </button>
+                  </li>
+                ))}
+                {(proposal.plan.unavailableItems ?? []).map((u) => (
+                  <li key={u.settingId} className="review-info-item">
+                    <div>
+                      <strong>{u.label}</strong> <span className="chip">Unavailable</span>
+                      <span className="review-info-why"> — {u.reason}</span>
+                    </div>
+                    <button type="button" className="link" onClick={() => requestFocus(proposal.game, u.settingId)}>
+                      Show in settings
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       {videoConfirm ? (
         <div className="tray-clash-confirm" role="alert">
@@ -487,6 +581,7 @@ export function AdaptiveWorkspace({
   const setOpen = useAppStore((s) => s.setWorkspaceOpen);
   const activeTab = useAppStore((s) => s.workspaceTab);
   const setTab = useAppStore((s) => s.setWorkspaceTab);
+  const popOutWorkspace = useAppStore((s) => s.popOutWorkspace);
   const [popupBlocked, setPopupBlocked] = useState(false);
 
   const pending = proposals.filter((p) => p.status === "pending");
@@ -496,9 +591,8 @@ export function AdaptiveWorkspace({
   const detachedUrl = `?view=workspace&game=${game}`;
 
   const popOut = () => {
-    const win = window.open(detachedUrl, "csc2524-adaptive-workspace", "width=1120,height=820");
-    if (!win) setPopupBlocked(true);
-    else setPopupBlocked(false);
+    const ok = popOutWorkspace(game);
+    setPopupBlocked(!ok);
   };
 
   return (

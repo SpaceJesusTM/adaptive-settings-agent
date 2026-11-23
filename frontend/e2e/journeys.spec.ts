@@ -185,15 +185,22 @@ test.describe("B/D. Auto-staging, Adaptive Workspace, Pinned direct edits & Comp
     expect((profile.preferences[0] as { scope: string }).scope).toBe("session");
   });
 
-  test("detached ?view=workspace loads independently, fills window height without footer bleed, and synchronizes game + proposals", async ({
+  test("detached ?view=workspace loads independently, fills window height without footer bleed, hides main panels exclusively, and restores on close without reload", async ({
     page,
     context,
   }) => {
     await setup(page, { scenario: "fresh_install_comprehensive", condition: "adaptive", game: "valorant", aiMode: "fallback" });
+    await expect(page.locator(".assistant")).toBeVisible();
     const detached = await context.newPage();
     await detached.setViewportSize({ width: 1280, height: 800 });
     await detached.goto("/?view=workspace&game=valorant");
     await expect(detached.locator(".standalone-shell")).toBeVisible();
+
+    // Exclusive pop-out relocation: main window hides docked Assistant + Workspace and shows pop-out pill + Dock here
+    await expect(page.locator(".assistant")).toHaveCount(0);
+    await expect(page.locator(".aw-workspace")).toHaveCount(0);
+    await expect(page.getByText(/Workspace popped out/)).toBeVisible();
+    await expect(page.getByRole("button", { name: "Dock here" })).toBeVisible();
 
     await detached.getByLabel("Message the assistant").fill("Configure everything for competitive FPS and clarity.");
     await detached.getByRole("button", { name: "Send" }).click();
@@ -228,7 +235,11 @@ test.describe("B/D. Auto-staging, Adaptive Workspace, Pinned direct edits & Comp
     // Main window picks up synchronized state
     await page.bringToFront();
     await expect(page.getByRole("group", { name: "Game" }).getByRole("button", { name: "CS2" })).toHaveAttribute("aria-pressed", "true");
+
+    // Closing detached window restores main window Assistant without browser reload
     await detached.close();
+    await expect(page.locator(".assistant")).toBeVisible({ timeout: 12_000 });
+    await expect(page.getByText(/Workspace popped out/)).toHaveCount(0);
   });
 });
 
@@ -313,5 +324,130 @@ test.describe("VALORANT Crosshair & CS2 HUD Edge Positions & New tab", () => {
     // New tab works cleanly
     await page.getByRole("tab", { name: "New" }).click();
     await expect(page.getByTestId("cs2-promoted-tab")).toBeVisible();
+  });
+});
+
+test.describe("Final HCI Pass journeys: History provenance, Aligned review, My Priorities, Adaptive Onboarding & Cross-Game Helper", () => {
+  test("History displays truthful provenance + live state + safe Review & restage without silent apply", async ({ page }) => {
+    await setup(page, { condition: "adaptive", game: "valorant", aiMode: "fallback" });
+    await askAssistant(page, "I want lower input latency.");
+    await page.getByRole("banner").getByRole("button", { name: /^Workspace/ }).click();
+    await expect(page.locator(".aw-workspace .tray-item").first()).toBeVisible();
+    await page.getByRole("button", { name: /Apply selected changes/ }).click();
+    await expect.poll(() => value(page, "valorant", "val.video.vsync")).toBe("off");
+
+    // Manual override makes the AI batch partially superseded ("Changed since" + "(now On)")
+    await openTab(page, "Video", "Graphics Quality");
+    await row(page, "val.video.vsync").getByRole("radio", { name: "On" }).click();
+    await expect.poll(() => value(page, "valorant", "val.video.vsync")).toBe("on");
+
+    await page.getByRole("button", { name: "History" }).click();
+    const items = page.locator(".history-item");
+    await expect(items.nth(0)).toContainText("Manual edit — no assistant rationale was recorded.");
+    await expect(items.nth(1)).toContainText("Original request:");
+    await expect(items.nth(1)).toContainText("Changed since");
+    await expect(items.nth(1)).toContainText("(now On)");
+
+    await items.nth(1).getByRole("button", { name: "Why suggested & trade-offs" }).click();
+    await expect(items.nth(1).locator(".history-why-list")).toBeVisible();
+
+    // Review & restage creates an editable draft without changing VSync yet
+    await items.nth(1).getByRole("button", { name: "Review & restage" }).click();
+    await expect(page.locator(".aw-workspace .tray-proposal")).toContainText("Restaged from history");
+    expect(await value(page, "valorant", "val.video.vsync")).toBe("on");
+  });
+
+  test("well_configured_competitive surfaces already-aligned settings and makes zero forced changes", async ({ page }) => {
+    await setup(page, { scenario: "well_configured_competitive", condition: "adaptive", game: "valorant", aiMode: "fallback" });
+    const before = await api<{ values: Record<string, { value: unknown }> }>(page, "/api/games/valorant/state");
+    await askAssistant(page, "Configure everything for competitive FPS and clarity.");
+    await expect(page.locator(".msg-aligned-box")).toBeVisible();
+    await expect(page.locator(".msg-aligned-box")).toContainText("No changes needed to apply");
+    await expect(page.locator(".msg-aligned-box").getByRole("button", { name: "Show in settings" }).first()).toBeVisible();
+    const after = await api<{ values: Record<string, { value: unknown }> }>(page, "/api/games/valorant/state");
+    expect(after.values).toEqual(before.values);
+  });
+
+  test("My Priorities displays 3 clear sections and persists confirmed personal setup facts without modifying game settings", async ({ page }) => {
+    await setup(page, { condition: "adaptive", game: "valorant", aiMode: "fallback" });
+    const before = await api<{ values: Record<string, { value: unknown }> }>(page, "/api/games/valorant/state");
+    await page.getByRole("tab", { name: "My Priorities" }).click();
+
+    await expect(page.getByText(/1\. Current goal/)).toBeVisible();
+    await expect(page.getByText(/2\. General priorities/)).toBeVisible();
+    await expect(page.getByText(/3\. Personal setup facts/)).toBeVisible();
+
+    await page.getByLabel("Personal setup type").selectOption("push_to_talk_key");
+    await page.getByLabel("Personal setup value").fill("V");
+    await page.getByRole("button", { name: "Confirm fact" }).click();
+    await expect(page.locator(".prefs .pref-item", { hasText: "Push-to-talk key" })).toContainText("V");
+
+    await page.reload();
+    await page.getByRole("tab", { name: "My Priorities" }).click();
+    await expect(page.locator(".prefs .pref-item", { hasText: "Push-to-talk key" })).toContainText("V");
+    const after = await api<{ values: Record<string, { value: unknown }> }>(page, "/api/games/valorant/state");
+    expect(after.values).toEqual(before.values);
+  });
+
+  test("valorant_onboarding_to_cs2 surfaces inspect-only onboarding cards, persists completion across games, and triggers VSync-Off companion follow-up", async ({
+    page,
+  }) => {
+    await setup(page, { scenario: "valorant_onboarding_to_cs2", condition: "adaptive", game: "cs2", aiMode: "fallback" });
+    await page.getByRole("banner").getByRole("button", { name: /^Workspace/ }).click();
+    await page.getByRole("tab", { name: /^Discover/ }).click();
+
+    const rn = page.locator(".rn");
+    await expect(rn).toContainText("Getting started in CS2");
+    await expect(rn.locator(".chip", { hasText: "Manual control" }).first()).toBeVisible();
+    await expect(rn.getByRole("button", { name: "Mark checked" }).first()).toBeVisible();
+
+    // Mark the first inspect card checked and confirm completion persists across game switch
+    const firstCard = rn.locator(".rec-card").first();
+    await firstCard.getByRole("button", { name: "Mark checked" }).click();
+    await expect(firstCard.locator(".state-badge")).toHaveText("Checked");
+    await expect(rn.locator(".rn-count")).toHaveText("2");
+
+    await page.getByRole("group", { name: "Game" }).getByRole("button", { name: "VALORANT" }).click();
+    await page.getByRole("group", { name: "Game" }).getByRole("button", { name: "CS2" }).click();
+    await page.getByRole("tab", { name: /^Discover/ }).click();
+    await expect(rn.locator(".rec-card").first().locator(".state-badge")).toHaveText("Checked");
+    await expect(rn.locator(".rn-count")).toHaveText("2");
+
+    // Mark remaining onboarding cards checked -> Revisit first-time checks appears
+    const markBtns = rn.getByRole("button", { name: "Mark checked" });
+    while ((await markBtns.count()) > 0) {
+      const beforeCount = await markBtns.count();
+      await markBtns.first().click();
+      await expect(markBtns).toHaveCount(beforeCount - 1);
+    }
+    await expect(rn.getByRole("button", { name: "Revisit first-time checks" })).toBeVisible();
+
+    // Turning VSync Off manually in VALORANT (default scenario where Reflex is Off) triggers a companion follow-up in Discover
+    await setup(page, { scenario: "default", condition: "adaptive", game: "valorant", aiMode: "fallback" });
+    await openTab(page, "Video", "Graphics Quality");
+    await row(page, "val.video.vsync").getByRole("radio", { name: "Off" }).click();
+    await expect.poll(() => value(page, "valorant", "val.video.vsync")).toBe("off");
+    await page.getByRole("banner").getByRole("button", { name: /^Workspace/ }).click();
+    await page.getByRole("tab", { name: /^Discover/ }).click();
+    const valRn = page.locator(".rn");
+    const refreshBtn = valRn.getByRole("button", { name: "Refresh" });
+    if (await refreshBtn.isVisible()) await refreshBtn.click();
+    await expect(valRn).toContainText("Something worth checking after your recent change");
+    await expect(valRn).toContainText("NVIDIA Reflex Low Latency");
+  });
+
+  test("Grounded cross-game comparison answers push-to-talk and 360° sensitivity 0.35 -> 1.11 without mutating settings", async ({ page }) => {
+    await setup(page, { scenario: "valorant_onboarding_to_cs2", condition: "adaptive", game: "cs2", aiMode: "fallback" });
+    const before = await api<{ values: Record<string, { value: unknown }> }>(page, "/api/games/cs2/state");
+    await askAssistant(page, "What is the CS2 equivalent of VALORANT push-to-talk and what is 0.35 VALORANT sensitivity in CS2?");
+
+    const cgList = page.locator(".cg-list");
+    await expect(cgList).toBeVisible();
+    await expect(cgList).toContainText("1.11");
+    await expect(cgList).toContainText("Hipfire");
+    await expect(cgList.getByRole("button", { name: "Show in settings" }).first()).toBeVisible();
+
+    const after = await api<{ values: Record<string, { value: unknown }> }>(page, "/api/games/cs2/state");
+    expect(after.values).toEqual(before.values);
   });
 });

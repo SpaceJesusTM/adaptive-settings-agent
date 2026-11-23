@@ -161,10 +161,137 @@
   font-size: 12.5px;
   margin: 8px 0 0;
 }
+.rn-head-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.rn-revisit {
+  font-size: 12px;
+}
+.rn-group {
+  margin-top: 12px;
+}
+.rn-group-title {
+  margin: 0 0 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--chrome-muted);
+}
 .rn-cards {
   display: grid;
   gap: 8px;
-  margin-top: 8px;
+  margin-top: 6px;
+}
+.msg-aligned-box,
+.cg-card,
+.tray-review-extras {
+  border: 1px solid #262d39;
+  border-radius: 7px;
+  padding: 9px 11px;
+  background: #131820;
+  display: grid;
+  gap: 8px;
+}
+.cg-list {
+  display: grid;
+  gap: 8px;
+}
+.cg-card {
+  border-left: 3px solid var(--accent);
+}
+.cg-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.cg-summary,
+.cg-diff,
+.cg-safety {
+  margin: 0;
+  font-size: 12.5px;
+}
+.cg-diff {
+  color: #b9c0ca;
+}
+.cg-safety {
+  color: #f0d48c;
+}
+.cg-cols {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+.cg-col ul,
+.cg-sens-note ul {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  font-size: 12px;
+}
+.cg-sens-note {
+  padding: 7px 9px;
+  border-radius: 5px;
+  background: rgba(142, 162, 255, 0.08);
+  border: 1px solid rgba(142, 162, 255, 0.3);
+  font-size: 12.5px;
+}
+.review-group {
+  display: grid;
+  gap: 6px;
+}
+.review-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+}
+.review-info-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 5px;
+}
+.review-info-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12.5px;
+  padding: 5px 8px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.025);
+}
+.review-info-why {
+  color: #b9c0ca;
+}
+.pref-conflict {
+  padding: 7px 9px;
+  border-radius: 6px;
+  border: 1px solid rgba(227, 179, 65, 0.55);
+  background: rgba(227, 179, 65, 0.08);
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+.pref-quick-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.pref-fact-input {
+  background: #0e1117;
+  border: 1px solid var(--chrome-line);
+  border-radius: 4px;
+  padding: 4px 7px;
+  font-size: 12.5px;
+  min-width: 110px;
+  flex: 1 1 110px;
 }
 .dismiss-box {
   display: flex;

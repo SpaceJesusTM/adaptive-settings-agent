@@ -2,12 +2,21 @@ import type { GameId } from "../api/types";
 
 export type SyncInput =
   | { type: "state_changed"; game: GameId }
-  | { type: "navigate_setting"; game: GameId; settingId: string };
+  | { type: "navigate_setting"; game: GameId; settingId: string }
+  | { type: "open_workspace_tab"; tab: "changes" | "pinned" | "discover"; game: GameId }
+  | { type: "workspace_attached" }
+  | { type: "workspace_heartbeat" }
+  | { type: "workspace_closed" }
+  | { type: "workspace_ping" }
+  | { type: "workspace_focus_request" }
+  | { type: "workspace_recall" };
 
 export type SyncMessage = SyncInput & { senderId: string; ts: number };
 
 const CHANNEL_NAME = "csc2524-workspace-sync";
 const STORAGE_KEY = "csc2524.sync.event";
+const LEASE_KEY = "csc2524.detached.lease";
+export const DETACHED_TTL_MS = 5000;
 
 export const TAB_SENDER_ID =
   typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -25,6 +34,43 @@ function getChannel(): BroadcastChannel | null {
     }
   }
   return channel;
+}
+
+export function writeDetachedLease(senderId: string = TAB_SENDER_ID): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(LEASE_KEY, JSON.stringify({ senderId, ts: Date.now() }));
+  } catch {
+    // ignore private browsing quota issues
+  }
+}
+
+export function clearDetachedLease(senderId?: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (senderId) {
+      const raw = window.localStorage.getItem(LEASE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as { senderId?: string };
+        if (parsed.senderId && parsed.senderId !== senderId) return;
+      }
+    }
+    window.localStorage.removeItem(LEASE_KEY);
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function isDetachedLeaseAlive(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    const raw = window.localStorage.getItem(LEASE_KEY);
+    if (!raw) return false;
+    const parsed = JSON.parse(raw) as { ts?: number };
+    return typeof parsed.ts === "number" && Date.now() - parsed.ts < DETACHED_TTL_MS;
+  } catch {
+    return false;
+  }
 }
 
 export function broadcastSync(msg: SyncInput): void {
@@ -56,6 +102,12 @@ export function subscribeSync(onMessage: (msg: SyncMessage) => void, onFocus?: (
   };
   const onBc = (e: MessageEvent) => handle(e.data);
   const onStorage = (e: StorageEvent) => {
+    if (e.key === LEASE_KEY) {
+      if (!e.newValue) {
+        onMessage({ type: "workspace_closed", senderId: "storage", ts: Date.now() });
+      }
+      return;
+    }
     if (e.key !== STORAGE_KEY || !e.newValue) return;
     try {
       handle(JSON.parse(e.newValue));
