@@ -14,15 +14,19 @@ from typing import Any, Callable, Optional
 import httpx
 from ollama import ResponseError
 
+from ..catalog.schema import DIMENSION_LABELS
 from ..config import Settings
 from ..domain.db import dumps, loads, new_id, now_iso, write_tx
 from ..domain.errors import Conflict, Invalid, NotFound
-from ..domain.profile import ProfileService
+from ..domain.observations import FACT_SETTING_MAP
+from ..domain.profile import PERSONAL_FACT_TYPES, ProfileService
 from ..domain.proposals import ProposalService
+from ..domain.recommender import RelevantNowService
 from ..domain.store import Store
 from .fallback import fallback_turn
 from .graph import InvalidModelToolCall, build_turn_graph, make_chat_models
 from .health import describe_status, model_label, probe_ollama
+from .intent import is_goal_statement, is_speculative
 from .validate import validate_draft
 
 ModelFactory = Callable[[Settings], tuple[Any, Any]]
@@ -49,12 +53,14 @@ class AgentRunner:
         settings: Settings,
         model_factory: ModelFactory = make_chat_models,
         proposals: Optional[ProposalService] = None,
+        relevant_now: Optional[RelevantNowService] = None,
     ):
         self.store = store
         self.profile = profile
         self.settings = settings
         self.model_factory = model_factory
         self.proposals = proposals or ProposalService(store, profile)
+        self.relevant_now = relevant_now or RelevantNowService(store, profile)
         self._active: dict[str, RunHandle] = {}
         self._game_run: dict[str, str] = {}
         self._lock = asyncio.Lock()
@@ -320,6 +326,7 @@ class AgentRunner:
                     source="fallback",
                     max_recommendations=scope_plan.max_recs,
                     scope_plan=scope_plan,
+                    message=message,
                 )
                 validated["plan"] = {
                     **scope_plan.to_meta(),
@@ -332,6 +339,7 @@ class AgentRunner:
                         "eligibleCount": audit["eligibleCount"],
                         "proposedCount": len(validated["recommendations"]),
                         "alreadyAlignedCount": audit["alreadyAlignedCount"],
+                        "tradeoffRetainedCount": audit.get("tradeoffRetainedCount", 0),
                         "alreadyStagedCount": audit["alreadyStagedCount"],
                         "lockedCount": audit["lockedCount"],
                         "unavailableCount": audit["unavailableCount"],
@@ -339,6 +347,7 @@ class AgentRunner:
                         "byCategory": audit["byCategory"],
                     },
                     "alreadyAlignedItems": audit.get("alreadyAlignedItems", []),
+                    "tradeoffRetainedItems": audit.get("tradeoffRetainedItems", []),
                     "lockedItems": audit.get("lockedItems", []),
                     "unavailableItems": audit.get("unavailableItems", []),
                     "manualConsiderations": audit["manualConsiderations"][:10],
@@ -403,15 +412,85 @@ class AgentRunner:
     ) -> None:
         latency = round((time.perf_counter() - handle.started) * 1000)
         proposal_ids: list[str] = []
+        sync_trigger: Optional[str] = None
+        is_adaptive = False
         conn = self.store.connect()
         try:
             with write_tx(conn):
                 sess = self.store.session(conn)
+                is_adaptive = sess.get("condition") == "adaptive" and bool(sess.get("adaptationEnabled", True))
                 if result is not None:
                     result = {**result, "provenance": {**(provenance or {}), "latencyMs": latency}}
-                    if result.get("intent") == "recommend" and result.get("goalDimensions") and message:
-                        goal_id = self.profile.set_session_goal(conn, handle.game, message[:160], result["goalDimensions"], "chat")
-                        result["sessionGoalId"] = goal_id
+                    msg_text = (message or "").strip()
+                    speculative = bool(msg_text and is_speculative(msg_text))
+                    if (
+                        msg_text
+                        and not speculative
+                        and result.get("goalDimensions")
+                        and (
+                            result.get("intent") == "recommend"
+                            or result.get("goalChanged")
+                            or is_goal_statement(msg_text, result["goalDimensions"])
+                        )
+                    ):
+                        goal_id = self.profile.set_session_goal(conn, handle.game, msg_text[:160], result["goalDimensions"], "chat")
+                        if goal_id:
+                            result["sessionGoalId"] = goal_id
+                            sync_trigger = "goal_change"
+
+                    applied_updates: list[dict[str, Any]] = []
+                    if msg_text and not speculative:
+                        for mem in result.get("explicitMemoryActions", []):
+                            if mem.get("kind") == "preference" and mem.get("dimension") in DIMENSION_LABELS:
+                                dim = mem["dimension"]
+                                direction = mem.get("direction", "prioritize")
+                                scope = mem.get("scope", "durable")
+                                target_g = mem.get("game") or handle.game
+                                pid = self.profile.add_preference_tx(
+                                    conn,
+                                    dimension=dim,
+                                    direction=direction,
+                                    scope=scope,
+                                    source="chat_explicit",
+                                    game=target_g,
+                                    origin_game=target_g,
+                                    note=mem.get("quote"),
+                                )
+                                applied_updates.append({
+                                    "kind": "preference",
+                                    "id": pid,
+                                    "dimension": dim,
+                                    "dimensionLabel": DIMENSION_LABELS[dim],
+                                    "direction": direction,
+                                    "scope": scope,
+                                    "game": target_g,
+                                    "label": f"{'Prioritize' if direction == 'prioritize' else 'De-prioritize'} {DIMENSION_LABELS[dim]} ({scope})",
+                                })
+                                sync_trigger = sync_trigger or "memory_update"
+                            elif mem.get("kind") == "fact" and mem.get("factKey") in PERSONAL_FACT_TYPES and mem.get("valueText"):
+                                fk = mem["factKey"]
+                                target_g = mem.get("game") or handle.game
+                                src_sid = FACT_SETTING_MAP.get(fk, {}).get(target_g)
+                                fid = self.profile.add_personal_fact_tx(
+                                    conn,
+                                    fact_key=fk,
+                                    value_text=mem["valueText"],
+                                    origin_game=target_g,
+                                    source_setting_id=src_sid,
+                                    source="chat_explicit",
+                                    note=mem.get("quote"),
+                                )
+                                applied_updates.append({
+                                    "kind": "fact",
+                                    "id": fid,
+                                    "factKey": fk,
+                                    "valueText": mem["valueText"],
+                                    "originGame": target_g,
+                                    "label": f"{PERSONAL_FACT_TYPES[fk]['label']} ({target_g.upper()}): {mem['valueText']}",
+                                })
+                                sync_trigger = sync_trigger or "memory_update"
+                    if applied_updates:
+                        result["appliedMemoryUpdates"] = applied_updates
 
                     plan_meta = result.get("plan") or {}
                     recs = result.get("recommendations") or []
@@ -507,3 +586,5 @@ class AgentRunner:
             conn.close()
             self._game_run.pop(handle.game, None)
             self._active.pop(handle.run_id, None)
+        if sync_trigger and is_adaptive:
+            self.relevant_now.sync_on_event(handle.game, sync_trigger)

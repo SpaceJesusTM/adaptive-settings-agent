@@ -38,7 +38,7 @@ def build_services(settings: Optional[Settings] = None, *, model_factory: ModelF
     profile = ProfileService(store)
     proposals = ProposalService(store, profile)
     relevant_now = RelevantNowService(store, profile)
-    runner = AgentRunner(store, profile, settings, model_factory=model_factory, proposals=proposals)
+    runner = AgentRunner(store, profile, settings, model_factory=model_factory, proposals=proposals, relevant_now=relevant_now)
     crosshair = CrosshairProfileService(store)
     return Services(settings=settings, registry=registry, store=store, profile=profile, proposals=proposals,
                     relevant_now=relevant_now, runner=runner, crosshair=crosshair)

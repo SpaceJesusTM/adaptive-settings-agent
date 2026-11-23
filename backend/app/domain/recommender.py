@@ -17,12 +17,13 @@ from ..catalog.schema import DIMENSION_LABELS, Setting
 from .cross_game import convert_hipfire_sensitivity
 from .db import dumps, loads, new_id, now_iso, write_tx
 from .errors import Invalid
+from .observations import ONBOARDING_OBSERVATION_SPECS, detect_fact_discrepancies, observe_setting
 from .profile import ProfileService
 from .store import Store
 from .values import availability_problem, display_value, values_equal
 
-MAX_RELEVANT_NOW = 3
-MAX_GOAL_CANDIDATES = 3
+MAX_RELEVANT_NOW = 4
+MAX_GOAL_CANDIDATES = 4
 BASIS_FACTOR = {"official": 1.0, "editorial": 0.8}
 
 TRIGGER_LABELS: dict[str, str] = {
@@ -211,6 +212,7 @@ def rank_candidates(
             "whatItDoes": s.description,
             "whatItDoesSource": s.descriptionSource,
             "why": best_hint.why,
+            "whyOrigin": "goal_hint",
             "whyBasis": best_hint.basis,
             "basedOn": [r["text"] for r in reasons],
             "crossGame": any(r.get("crossGame") for r in reasons),
@@ -231,10 +233,11 @@ def detect_followup_cards(
     *,
     exclude_dismissed: bool = True,
 ) -> list[dict[str, Any]]:
-    """Build low-noise companion follow-up cards after meaningful user changes."""
+    """Build low-noise companion follow-up cards after meaningful active-session changes."""
     values = store.flat_values(conn, game)
     locked = set(store.locks(conn, game))
     hardware = store.hardware(conn)
+    sess_id = store.session(conn)["sessionId"]
     staged = {
         r["setting_id"]
         for r in conn.execute(
@@ -245,14 +248,14 @@ def detect_followup_cards(
     }
     batches = conn.execute(
         "SELECT id, source, created_at FROM change_batches "
-        "WHERE game = ? AND source != 'reset' AND undone_by_batch_id IS NULL "
-        "ORDER BY created_at DESC, rowid DESC LIMIT 6",
-        (game,),
+        "WHERE game = ? AND session_id = ? AND source != 'reset' AND undone_by_batch_id IS NULL "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 8",
+        (game, sess_id),
     ).fetchall()
     if not batches:
         return []
 
-    changed_recently: dict[str, tuple[str, str]] = {}
+    changed_recently: dict[str, tuple[str, str, str]] = {}
     for b in batches:
         evs = conn.execute(
             "SELECT setting_id, new_value_json FROM change_events WHERE batch_id = ?",
@@ -260,7 +263,7 @@ def detect_followup_cards(
         ).fetchall()
         for e in evs:
             if e["setting_id"] not in changed_recently:
-                changed_recently[e["setting_id"]] = (b["created_at"], str(loads(e["new_value_json"])))
+                changed_recently[e["setting_id"]] = (b["created_at"], str(loads(e["new_value_json"])), b["id"])
 
     weights = profile.dimension_weights(conn, game)
     sig = ProfileService.signature(weights)
@@ -269,6 +272,14 @@ def detect_followup_cards(
         for r in conn.execute(
             "SELECT setting_id FROM dismissals WHERE game = ? AND signature = ?",
             (game, sig),
+        )
+    } if exclude_dismissed else set()
+
+    resolved_followups = {
+        (r["rule_id"], r["trigger_batch_id"])
+        for r in conn.execute(
+            "SELECT rule_id, trigger_batch_id FROM followup_resolutions WHERE game = ?",
+            (game,),
         )
     } if exclude_dismissed else set()
 
@@ -282,7 +293,9 @@ def detect_followup_cards(
         cur_trig = values.get(trig_id)
         if not any(values_equal(cur_trig, tv) for tv in rule["triggerValues"]):
             continue
-        trig_time = changed_recently[trig_id][0]
+        trig_time, _, trig_batch_id = changed_recently[trig_id]
+        if (rule["id"], trig_batch_id) in resolved_followups:
+            continue
         target_id = rule["targetSettingId"]
         # Suppress follow-up if the user already adjusted the companion setting at/after the trigger change
         if target_id in changed_recently and changed_recently[target_id][0] >= trig_time:
@@ -308,6 +321,7 @@ def detect_followup_cards(
             "triggerGroup": "followup",
             "triggerLabel": TRIGGER_LABELS["followup"],
             "ruleId": rule["id"],
+            "triggerBatchId": trig_batch_id,
             "settingId": s_tgt.id,
             "label": s_tgt.exactLabel,
             "path": s_tgt.canonicalPath,
@@ -321,6 +335,7 @@ def detect_followup_cards(
             "whatItDoes": s_tgt.description,
             "whatItDoesSource": s_tgt.descriptionSource,
             "why": rule["why"],
+            "whyOrigin": "followup_rule",
             "whyBasis": "editorial",
             "basedOn": [f"your recent change to {s_trig.exactLabel} ({display_value(s_trig, cur_trig)})"],
             "crossGame": False,
@@ -337,13 +352,13 @@ def build_onboarding_cards(
     profile: ProfileService,
     conn: sqlite3.Connection,
     game: str,
+    *,
+    has_priority_recs: Optional[bool] = None,
 ) -> list[dict[str, Any]]:
-    """Build adaptive first-time onboarding cards calibrated to genuine profile evidence.
+    """Build evidence-sensitive onboarding cards from live observations, facts, and discrepancies.
 
-    Scenario 1 (confirmed personal facts from other game): concrete personal-control inspect checks.
-    Scenario 2 (durable priorities, no personal facts): priority-backed settings come from rank_candidates.
-    Scenario 3 (fresh profile): 2 neutral personal control checks without assuming competitive graphics.
-    Scenario 4 (completed/dismissed onboarding): returns [].
+    Never claims defaults or scenario seeds represent personal user preferences, and never suppresses
+    relevant onboarding checks solely because unrelated dimension priorities exist.
     """
     ob = profile.ensure_onboarding_tx(conn, game)
     if ob["status"] in ("completed", "dismissed"):
@@ -353,15 +368,28 @@ def build_onboarding_cards(
     other_game = "valorant" if game == "cs2" else "cs2"
     facts = profile.personal_facts(conn)
     other_facts = {f["factKey"]: f for f in facts if f.get("originGame") == other_game}
-    all_facts = {f["factKey"]: f for f in facts}
-    durable_prefs = [p for p in profile.preferences(conn) if p["scope"] == "durable"]
+    same_facts = {f["factKey"]: f for f in facts if f.get("originGame") == game}
+    discrepancies = detect_fact_discrepancies(store, profile, conn)
+    disc_by_key = {(d["game"], d["factKey"]): d for d in discrepancies}
     values = store.flat_values(conn, game)
+
+    if has_priority_recs is None:
+        has_priority_recs = bool(profile.preferences(conn) or profile.session_goals(conn, game))
 
     title_game = "CS2" if game == "cs2" else "VALORANT"
     other_title = "VALORANT" if other_game == "valorant" else "CS2"
     cards: list[dict[str, Any]] = []
 
-    def make_inspect(setting_id: str, check_id: str, why: str, based_on: list[str], dim: str, caveat: Optional[str] = None, cross_game: bool = False) -> Optional[dict[str, Any]]:
+    def make_inspect(
+        setting_id: str,
+        check_id: str,
+        why: str,
+        based_on: list[str],
+        dim: str,
+        score: float,
+        caveat: Optional[str] = None,
+        cross_game: bool = False,
+    ) -> Optional[dict[str, Any]]:
         if check_id in done_checks:
             return None
         s = store.registry.setting(game, setting_id)
@@ -380,12 +408,13 @@ def build_onboarding_cards(
             "currentDisplay": display_value(s, cur),
             "targetValue": cur,
             "targetDisplay": "Manual check",
-            "score": 1.15,
+            "score": score,
             "dimension": dim,
             "dimensionLabel": DIMENSION_LABELS.get(dim, dim),
             "whatItDoes": s.description,
             "whatItDoesSource": s.descriptionSource,
             "why": why,
+            "whyOrigin": "onboarding_observation",
             "whyBasis": "official",
             "basedOn": based_on,
             "crossGame": cross_game,
@@ -395,100 +424,262 @@ def build_onboarding_cards(
             "order": s.order,
         }
 
-    # Scenario 1: Confirmed personal setup facts from the other game
-    if other_facts:
-        ptt_fact = other_facts.get("push_to_talk_key")
-        if ptt_fact:
-            target_sid = "cs2.kbmouse.key_mic" if game == "cs2" else "val.controls.key_team_ptt"
-            c = make_inspect(
-                target_sid,
-                f"ob_{game}_ptt",
-                (
-                    f"You confirmed using {ptt_fact['valueText']} for Push-to-Talk in {other_title}. "
-                    f"Inspect {title_game}'s voice key and rebind manually if you want the same muscle memory."
-                ),
-                [f"your confirmed {other_title} push-to-talk key ({ptt_fact['valueText']})"],
-                "communication",
-                "Keybindings are personal ergonomics and are never copied automatically.",
-                cross_game=True,
-            )
+    for spec in ONBOARDING_OBSERVATION_SPECS:
+        fk = spec["factKey"]
+        dim = spec["dimension"]
+        check_id = f"ob_{game}_{spec['checkSuffix']}"
+        cur_sid = spec["cs2Id"] if game == "cs2" else spec["valorantId"]
+        other_sid = spec["valorantId"] if game == "cs2" else spec["cs2Id"]
+        cur_obs = observe_setting(store, conn, game, cur_sid)
+        other_obs = observe_setting(store, conn, other_game, other_sid)
+        other_fact = other_facts.get(fk)
+        same_fact = same_facts.get(fk)
+        other_disc = disc_by_key.get((other_game, fk))
+        same_disc = disc_by_key.get((game, fk))
+        if cur_obs is None:
+            continue
+
+        if fk == "mouse_sensitivity":
+            if other_disc and other_obs:
+                conv = convert_hipfire_sensitivity(other_game, game, str(other_obs["value"]), confirmed=other_obs["deliberate"])
+                conv_note = (
+                    f" Using your live {other_title} value ({other_obs['display']}), a 360° hipfire match is ~{conv['convertedValue']} ({conv['formula']})."
+                    if conv.get("convertible")
+                    else ""
+                )
+                c = make_inspect(
+                    cur_sid,
+                    check_id,
+                    (
+                        f"Your remembered profile lists {other_title} sensitivity as {other_fact['valueText']}, "
+                        f"while live {other_title} currently has {other_obs['display']} ({other_obs['sourceLabel']}).{conv_note} "
+                        f"Inspect {title_game}'s slider manually so you convert from the one you actually use."
+                    ),
+                    [
+                        f"remembered {other_title} note ({other_fact['valueText']})",
+                        f"live {other_title} setting ({other_obs['display']} — {other_obs['sourceLabel']})",
+                    ],
+                    dim,
+                    1.26,
+                    " ".join(conv.get("caveats", [])) or "Key/sensitivity conversions never modify values automatically.",
+                    cross_game=True,
+                )
+            elif other_fact:
+                conv = convert_hipfire_sensitivity(other_game, game, other_fact["valueText"], confirmed=True)
+                if conv.get("convertible"):
+                    why = (
+                        f"Based on your remembered {other_title} sensitivity ({conv['sourceValue']}), "
+                        f"a 360° hipfire match in {title_game} is around {conv['convertedValue']} ({conv['formula']})."
+                    )
+                    caveat = " ".join(conv["caveats"])
+                else:
+                    why = (
+                        f"You recorded a {other_title} sensitivity note ({other_fact['valueText']}). "
+                        f"Inspect {title_game}'s sensitivity slider directly to dial in your aiming feel."
+                    )
+                    caveat = "Requires identical mouse DPI and comfort testing in practice range."
+                c = make_inspect(
+                    cur_sid,
+                    check_id,
+                    why,
+                    [f"your remembered {other_title} sensitivity ({other_fact['valueText']})"],
+                    dim,
+                    1.24,
+                    caveat,
+                    cross_game=True,
+                )
+            elif other_obs and other_obs["deliberate"]:
+                conv = convert_hipfire_sensitivity(other_game, game, str(other_obs["value"]), confirmed=True)
+                conv_str = f" (approx. {conv['convertedValue']} in {title_game}, {conv['formula']})" if conv.get("convertible") else ""
+                c = make_inspect(
+                    cur_sid,
+                    check_id,
+                    (
+                        f"Your live {other_title} sensitivity is {other_obs['display']} ({other_obs['sourceLabel']}){conv_str}. "
+                        f"Inspect {title_game}'s current {cur_obs['display']} slider manually if you want a matching turn distance."
+                    ),
+                    [f"observed {other_title} edit ({other_obs['display']} — {other_obs['sourceLabel']})"],
+                    dim,
+                    1.21,
+                    " ".join(conv.get("caveats", [])) or "Assumes identical mouse DPI.",
+                    cross_game=True,
+                )
+            elif same_disc:
+                c = make_inspect(
+                    cur_sid,
+                    check_id,
+                    (
+                        f"Your remembered {title_game} sensitivity ({same_fact['valueText']}) differs from "
+                        f"live {title_game} ({cur_obs['display']} — {cur_obs['sourceLabel']}). Confirm which value you want to keep."
+                    ),
+                    [f"remembered {title_game} note ({same_fact['valueText']})", f"live {title_game} ({cur_obs['display']})"],
+                    dim,
+                    1.22,
+                    "Sensitivity sliders stay under manual user control.",
+                )
+            elif cur_obs["deliberate"]:
+                c = make_inspect(
+                    cur_sid,
+                    check_id,
+                    (
+                        f"You set {title_game}'s Mouse Sensitivity to {cur_obs['display']} ({cur_obs['sourceLabel']}). "
+                        f"Mark this checked once you're happy with your turn feel."
+                    ),
+                    [f"your recent edit in {title_game} ({cur_obs['display']})"],
+                    dim,
+                    1.05,
+                )
+            elif other_obs and other_obs["sourceKind"] == "scenario_seed":
+                if has_priority_recs:
+                    continue
+                conv = convert_hipfire_sensitivity(other_game, game, str(other_obs["value"]), confirmed=False)
+                ref = f" A 360° hipfire match would be ~{conv['convertedValue']} ({conv['formula']}), though that preset was not confirmed as your preference." if conv.get("convertible") else ""
+                c = make_inspect(
+                    cur_sid,
+                    check_id,
+                    (
+                        f"The loaded scenario sets {other_title} sensitivity to {other_obs['display']} (scenario preset, not yet confirmed as your personal preference).{ref} "
+                        f"Check whether {title_game}'s {cur_obs['display']} suits your mouse DPI."
+                    ),
+                    [f"observed scenario preset in {other_title} ({other_obs['display']})"],
+                    dim,
+                    1.15,
+                    "Scenario values are unconfirmed starting points; adjust sensitivity manually.",
+                    cross_game=True,
+                )
+            else:
+                if has_priority_recs:
+                    continue
+                c = make_inspect(
+                    cur_sid,
+                    check_id,
+                    (
+                        f"{title_game} Mouse Sensitivity is currently {cur_obs['display']} ({cur_obs['sourceLabel']}). "
+                        f"Confirm it fits your mouse DPI and wrist/arm space — no personal preference is assumed yet."
+                    ),
+                    [f"observed {title_game} setting ({cur_obs['display']} — {cur_obs['sourceLabel']})"],
+                    dim,
+                    1.14,
+                )
             if c:
                 cards.append(c)
+            continue
 
-        sens_fact = other_facts.get("mouse_sensitivity")
-        if sens_fact:
-            conv = convert_hipfire_sensitivity(other_game, game, sens_fact["valueText"], confirmed=True)
-            target_sid = "cs2.kbmouse.mouse_sensitivity" if game == "cs2" else "val.general.sensitivity_aim"
-            if conv.get("convertible"):
-                why = (
-                    f"Based on your confirmed {other_title} sensitivity ({conv['sourceValue']}), "
-                    f"a 360° hipfire match in {title_game} is around {conv['convertedValue']} ({conv['formula']})."
+        if fk == "push_to_talk_key":
+            if other_disc and other_obs:
+                c = make_inspect(
+                    cur_sid,
+                    check_id,
+                    (
+                        f"Your remembered {other_title} Push-to-Talk key is {other_fact['valueText']}, while live {other_title} "
+                        f"uses {other_obs['display']} ({other_obs['sourceLabel']}). Inspect {title_game}'s {cur_obs['display']} keybind manually."
+                    ),
+                    [f"remembered {other_title} PTT ({other_fact['valueText']})", f"live {other_title} ({other_obs['display']})"],
+                    dim,
+                    1.24,
+                    "Keybindings are personal ergonomics and never copied automatically.",
+                    cross_game=True,
                 )
-                caveat = " ".join(conv["caveats"])
+            elif other_fact:
+                c = make_inspect(
+                    cur_sid,
+                    check_id,
+                    (
+                        f"You asked to remember {other_fact['valueText']} for Push-to-Talk in {other_title}. "
+                        f"Inspect {title_game}'s voice key (currently {cur_obs['display']}) and rebind manually if you want the same muscle memory."
+                    ),
+                    [f"your remembered {other_title} push-to-talk key ({other_fact['valueText']})"],
+                    dim,
+                    1.22,
+                    "Keybindings are personal ergonomics and are never copied automatically.",
+                    cross_game=True,
+                )
+            elif other_obs and other_obs["deliberate"]:
+                c = make_inspect(
+                    cur_sid,
+                    check_id,
+                    (
+                        f"Your live {other_title} voice key is set to {other_obs['display']} ({other_obs['sourceLabel']}). "
+                        f"Check whether {title_game}'s {cur_obs['display']} feels natural without overriding muscle memory."
+                    ),
+                    [f"observed {other_title} edit ({other_obs['display']} — {other_obs['sourceLabel']})"],
+                    dim,
+                    1.19,
+                    "Keybindings stay under manual user control.",
+                    cross_game=True,
+                )
+            elif other_obs and other_obs["sourceKind"] == "scenario_seed":
+                c = make_inspect(
+                    cur_sid,
+                    check_id,
+                    (
+                        f"The loaded scenario binds {other_title} voice to {other_obs['display']} (scenario preset, not confirmed as your preference). "
+                        f"Check {title_game}'s {cur_obs['display']} keybind directly."
+                    ),
+                    [f"observed scenario preset in {other_title} ({other_obs['display']})"],
+                    dim,
+                    1.14,
+                    "Keybindings stay under manual user control.",
+                    cross_game=True,
+                )
+            else:
+                c = make_inspect(
+                    cur_sid,
+                    check_id,
+                    (
+                        f"{title_game} Push-to-Talk is currently bound to {cur_obs['display']} ({cur_obs['sourceLabel']}). "
+                        f"Confirm this key feels comfortable before queueing; no saved voice preference is assumed."
+                    ),
+                    [f"observed {title_game} setting ({cur_obs['display']} — {cur_obs['sourceLabel']})"],
+                    dim,
+                    1.12,
+                )
+            if c:
+                cards.append(c)
+            continue
+
+        if fk == "ping_key":
+            has_ping_signal = bool(other_fact or other_disc or same_disc or (other_obs and other_obs["deliberate"]))
+            if not has_ping_signal:
+                continue
+            if other_disc and other_obs:
+                why = (
+                    f"Your remembered {other_title} ping key is {other_fact['valueText']}, while live {other_title} is bound to {other_obs['display']}. "
+                    f"Check whether {title_game}'s {cur_obs['display']} ping key matches your habit."
+                )
+                based = [f"remembered {other_title} ping ({other_fact['valueText']})", f"live {other_title} ({other_obs['display']})"]
+            elif other_fact:
+                why = (
+                    f"You remembered {other_fact['valueText']} for callout pings in {other_title}. "
+                    f"Check whether {title_game}'s ping key ({cur_obs['display']}) matches what feels natural."
+                )
+                based = [f"your remembered {other_title} ping key ({other_fact['valueText']})"]
+            elif other_obs and other_obs["deliberate"]:
+                why = (
+                    f"Your live {other_title} ping key is set to {other_obs['display']} ({other_obs['sourceLabel']}). "
+                    f"Inspect {title_game}'s {cur_obs['display']} keybind manually if you use quick callouts."
+                )
+                based = [f"observed {other_title} edit ({other_obs['display']})"]
             else:
                 why = (
-                    f"You recorded a {other_title} sensitivity note ({sens_fact['valueText']}). "
-                    f"Inspect {title_game}'s sensitivity slider directly to dial in your aiming feel."
+                    f"The loaded scenario sets {other_title} ping to {other_obs['display']} (scenario preset). "
+                    f"Check {title_game}'s {cur_obs['display']} ping key if you rely on map pings."
                 )
-                caveat = "Requires identical mouse DPI and comfort testing in practice range."
+                based = [f"observed scenario preset in {other_title} ({other_obs['display']})"]
             c = make_inspect(
-                target_sid,
-                f"ob_{game}_sens",
+                cur_sid,
+                check_id,
                 why,
-                [f"your confirmed {other_title} sensitivity ({sens_fact['valueText']})"],
-                "comfort",
-                caveat,
-                cross_game=True,
-            )
-            if c:
-                cards.append(c)
-
-        ping_fact = other_facts.get("ping_key")
-        if ping_fact:
-            target_sid = "cs2.kbmouse.key_player_ping" if game == "cs2" else "val.controls.key_ping"
-            c = make_inspect(
-                target_sid,
-                f"ob_{game}_ping",
-                (
-                    f"You confirmed {ping_fact['valueText']} for callout pings in {other_title}. "
-                    f"Check whether {title_game}'s ping key matches what feels natural."
-                ),
-                [f"your confirmed {other_title} ping key ({ping_fact['valueText']})"],
-                "communication",
+                based,
+                dim,
+                1.18 if (other_fact or other_obs and other_obs["deliberate"]) else 1.11,
                 "Keybindings stay under manual user control.",
                 cross_game=True,
             )
             if c:
                 cards.append(c)
 
-        return cards
-
-    # Scenario 2: Durable general priorities from another game (no personal facts) -> keep rank_candidates in lead,
-    # and if rank_candidates already fills cards, do not crowd out priority-backed recommendations.
-    if durable_prefs or all_facts:
-        return []
-
-    # Scenario 3: Brand-new user with no preferences or personal facts -> minimal, honest neutral onboarding checks
-    # Never assume they want competitive/low graphics.
-    sens_sid = "cs2.kbmouse.mouse_sensitivity" if game == "cs2" else "val.general.sensitivity_aim"
-    mic_sid = "cs2.kbmouse.key_mic" if game == "cs2" else "val.controls.key_team_ptt"
-    for sid, cid, dim, msg in [
-        (
-            sens_sid,
-            f"ob_{game}_sens",
-            "comfort",
-            f"First time in {title_game}: check your hipfire Mouse Sensitivity before queueing (not auto-tuned for you).",
-        ),
-        (
-            mic_sid,
-            f"ob_{game}_ptt",
-            "communication",
-            f"Confirm your Voice / Push-to-Talk keybinding feels natural; no saved voice preferences exist yet.",
-        ),
-    ]:
-        c = make_inspect(sid, cid, msg, [f"first visit to {title_game} (no saved profile yet)"], dim)
-        if c:
-            cards.append(c)
+    cards.sort(key=lambda c: (-c["score"], c["order"]))
     return cards
 
 
@@ -502,13 +693,19 @@ class RelevantNowService:
         fups = detect_followup_cards(self.store, self.profile, conn, game)
         extra = "|".join([
             str(ob.get("status")),
-            ",".join(ob.get("completedChecks", [])),
             ",".join(f["settingId"] for f in fups),
             ",".join(f["id"] for f in self.profile.personal_facts(conn)),
+            ",".join(d for g in self.profile.session_goals(conn, game) for d in g.get("dimensions", [])),
         ])
         return _dismissal_signature(weights, extra)
 
-    def _card_state(self, conn: sqlite3.Connection, game: str, card: dict[str, Any]) -> dict[str, Any]:
+    def _card_state(
+        self,
+        conn: sqlite3.Connection,
+        game: str,
+        card: dict[str, Any],
+        weights: Optional[dict[str, dict[str, Any]]] = None,
+    ) -> dict[str, Any]:
         s = self.store.registry.setting(game, card["settingId"])
         state = card.get("state", "suggested")
         if s is None:
@@ -516,16 +713,60 @@ class RelevantNowService:
         values = self.store.flat_values(conn, game)
         cur = values.get(s.id)
         ob = self.profile.get_onboarding(conn, game)
+        weights = weights if weights is not None else self.profile.dimension_weights(conn, game)
         check_id = card.get("checkId")
         if state != "dismissed":
-            if card.get("kind") == "inspect":
-                if check_id and check_id in ob.get("completedChecks", []):
+            if card.get("triggerGroup") == "followup":
+                rule_id = card.get("ruleId")
+                trig_batch_id = card.get("triggerBatchId")
+                res_row = (
+                    conn.execute(
+                        "SELECT status FROM followup_resolutions WHERE game = ? AND rule_id = ? AND trigger_batch_id = ?",
+                        (game, rule_id, trig_batch_id),
+                    ).fetchone()
+                    if rule_id and trig_batch_id
+                    else None
+                )
+                rule_def = next((r for r in FOLLOWUP_RULES if r["id"] == rule_id), None)
+                undone_trig = (
+                    conn.execute(
+                        "SELECT 1 FROM change_batches WHERE id = ? AND undone_by_batch_id IS NOT NULL",
+                        (trig_batch_id,),
+                    ).fetchone()
+                    if trig_batch_id
+                    else None
+                )
+                trig_still_matches = (
+                    rule_def is None
+                    or any(values_equal(values.get(rule_def["triggerSettingId"]), tv) for tv in rule_def["triggerValues"])
+                )
+                if res_row:
+                    state = "checked" if res_row["status"] == "checked" else "no_longer_relevant"
+                elif undone_trig or not trig_still_matches:
+                    state = "no_longer_relevant"
+                elif card.get("kind") == "change" and values_equal(cur, card["targetValue"]):
                     state = "applied"
+                elif card.get("kind") == "change" and self.store.is_locked(conn, game, s.id):
+                    state = "locked"
+                elif card.get("kind") == "change" and conn.execute(
+                    "SELECT 1 FROM proposal_items i JOIN proposals p ON p.id = i.proposal_id WHERE p.game = ? AND "
+                    "p.status = 'pending' AND i.status = 'pending' AND i.setting_id = ?",
+                    (game, s.id),
+                ).fetchone():
+                    state = "staged"
+                elif not values_equal(cur, card.get("currentValue")):
+                    state = "changed"
+                else:
+                    state = "suggested"
+            elif card.get("kind") == "inspect":
+                if check_id and check_id in ob.get("completedChecks", []):
+                    state = "checked"
                 elif not values_equal(cur, card.get("currentValue")):
                     state = "changed"
                 else:
                     state = "suggested"
             else:
+                dim = card.get("dimension")
                 if self.store.is_locked(conn, game, s.id):
                     state = "locked"
                 elif values_equal(cur, card["targetValue"]):
@@ -536,6 +777,8 @@ class RelevantNowService:
                     (game, s.id),
                 ).fetchone():
                     state = "staged"
+                elif card.get("triggerGroup") == "goal_or_preference" and dim and weights.get(dim, {}).get("weight", 0.0) <= 0:
+                    state = "no_longer_relevant"
                 elif not values_equal(cur, card["currentValue"]):
                     state = "changed"
                 else:
@@ -544,17 +787,27 @@ class RelevantNowService:
 
     def _collect_candidates(self, conn: sqlite3.Connection, game: str) -> list[dict[str, Any]]:
         weights = self.profile.dimension_weights(conn, game)
-        ob_cards = build_onboarding_cards(self.store, self.profile, conn, game)
         followup_cards = detect_followup_cards(self.store, self.profile, conn, game)
         goal_cards = rank_candidates(self.store, self.profile, conn, game, weights=weights, limit=MAX_RELEVANT_NOW)
-
-        merged: list[dict[str, Any]] = []
-        seen_ids: set[str] = set()
-        # Priority order: active simulated context events -> companion follow-ups -> adaptive onboarding -> goals/prefs
         ctx_cards = [c for c in goal_cards if c.get("triggerGroup") == "context_event"]
         non_ctx_goal_cards = [c for c in goal_cards if c.get("triggerGroup") != "context_event"]
+        ob_cards = build_onboarding_cards(
+            self.store,
+            self.profile,
+            conn,
+            game,
+            has_priority_recs=bool(non_ctx_goal_cards),
+        )
+        merged: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        has_cross_ob = any(c.get("crossGame") for c in ob_cards)
+        buckets: tuple[list[dict[str, Any]], ...] = (
+            (ctx_cards, followup_cards, ob_cards, non_ctx_goal_cards)
+            if has_cross_ob or not non_ctx_goal_cards
+            else (ctx_cards, followup_cards, non_ctx_goal_cards[:2], ob_cards[:2], non_ctx_goal_cards[2:], ob_cards[2:])
+        )
 
-        for bucket in (ctx_cards, followup_cards, ob_cards, non_ctx_goal_cards):
+        for bucket in buckets:
             for c in bucket:
                 if c["settingId"] in seen_ids:
                     continue
@@ -585,14 +838,14 @@ class RelevantNowService:
                     "onboardingStatus": ob.get("status"),
                     "canRevisitOnboarding": can_revisit,
                 }
-            items = [self._card_state(conn, game, c) for c in loads(row["items_json"], [])]
+            items = [self._card_state(conn, game, c, weights) for c in loads(row["items_json"], [])]
             fresh = self._collect_candidates(conn, game)
             visible = [c["settingId"] for c in items if c["state"] in ("suggested", "changed")]
             fresh_ids = [c["settingId"] for c in fresh]
             cur_sig = self._state_signature(conn, game, weights)
             update_available = bool(fresh_ids) and (
                 cur_sig != row["signature"]
-                or (len(visible) < MAX_RELEVANT_NOW and any(f not in [c["settingId"] for c in items] for f in fresh_ids))
+                or (len(visible) == 0 and any(f not in [c["settingId"] for c in items] for f in fresh_ids))
             )
             return {
                 "game": game,
@@ -600,7 +853,7 @@ class RelevantNowService:
                 "trigger": row["trigger"],
                 "createdAt": row["created_at"],
                 "updateAvailable": update_available,
-                "hasEvidence": bool(weights or fups or self.profile.personal_facts(conn)),
+                "hasEvidence": bool(weights or fups or self.profile.personal_facts(conn) or ob.get("status") == "active"),
                 "context": ctx,
                 "onboardingStatus": ob.get("status"),
                 "canRevisitOnboarding": can_revisit,
@@ -609,7 +862,17 @@ class RelevantNowService:
             conn.close()
 
     def refresh(self, game: str, trigger: str) -> dict[str, Any]:
-        if trigger not in ("first_visit", "context_event", "user_refresh", "preference_change", "onboarding_revisit", "followup"):
+        if trigger not in (
+            "first_visit",
+            "context_event",
+            "user_refresh",
+            "preference_change",
+            "onboarding_revisit",
+            "followup",
+            "goal_change",
+            "memory_update",
+            "undo",
+        ):
             raise Invalid("Unknown refresh trigger")
         conn = self.store.connect()
         try:
@@ -628,6 +891,10 @@ class RelevantNowService:
             conn.close()
         return self.get(game)
 
+    def sync_on_event(self, game: str, trigger: str) -> dict[str, Any]:
+        """Proactively update Discover on runtime events (goal shift, memory save, manual edit, undo)."""
+        return self.refresh(game, trigger)
+
     def ensure_first_visit(self, game: str) -> dict[str, Any]:
         conn = self.store.connect()
         try:
@@ -640,17 +907,29 @@ class RelevantNowService:
         conn = self.store.connect()
         try:
             with write_tx(conn):
-                ob = self.profile.mark_onboarding_check(conn, game, check_id, action="complete")
+                ob = self.profile.get_onboarding(conn, game)
+                if check_id.startswith("ob_"):
+                    ob = self.profile.mark_onboarding_check(conn, game, check_id, action="complete")
                 row = conn.execute("SELECT items_json FROM relevant_now WHERE game = ?", (game,)).fetchone()
                 if row:
                     items = loads(row["items_json"], [])
                     for c in items:
-                        if c.get("checkId") == check_id:
-                            c["state"] = "applied"
+                        matches_ob = c.get("checkId") == check_id
+                        matches_fu = c.get("triggerGroup") == "followup" and check_id in (
+                            c.get("ruleId"), c.get("settingId"), c.get("cardId")
+                        )
+                        if matches_ob or matches_fu:
+                            c["state"] = "checked"
+                            if matches_fu and c.get("ruleId") and c.get("triggerBatchId"):
+                                conn.execute(
+                                    "INSERT OR REPLACE INTO followup_resolutions(id, game, rule_id, trigger_batch_id, status, created_at) "
+                                    "VALUES (?,?,?,?,?,?)",
+                                    (new_id("fres"), game, c["ruleId"], c["triggerBatchId"], "checked", now_iso()),
+                                )
                     remaining_ob = [
                         c for c in items if c.get("triggerGroup") == "onboarding" and c.get("state") in ("suggested", "changed")
                     ]
-                    if not remaining_ob and ob.get("status") == "active":
+                    if not remaining_ob and ob.get("status") == "active" and any(c.get("triggerGroup") == "onboarding" for c in items):
                         self.profile.set_onboarding_status_tx(conn, game, "completed")
                     conn.execute("UPDATE relevant_now SET items_json = ? WHERE game = ?", (dumps(items), game))
         finally:
@@ -672,10 +951,11 @@ class RelevantNowService:
         try:
             with write_tx(conn):
                 weights = self.profile.dimension_weights(conn, game)
+                sess_id = self.store.session(conn)["sessionId"]
                 conn.execute(
                     "INSERT INTO dismissals(id, game, setting_id, reason, signature, session_id, created_at) VALUES (?,?,?,?,?,?,?)",
                     (new_id("dis"), game, setting_id, reason, ProfileService.signature(weights),
-                     self.store.session(conn)["sessionId"], now_iso()),
+                     sess_id, now_iso()),
                 )
                 row = conn.execute("SELECT items_json FROM relevant_now WHERE game = ?", (game,)).fetchone()
                 if row:
@@ -686,6 +966,12 @@ class RelevantNowService:
                             c["dismissReason"] = reason
                             if c.get("checkId"):
                                 self.profile.mark_onboarding_check(conn, game, c["checkId"], action="dismiss")
+                            if c.get("triggerGroup") == "followup" and c.get("ruleId") and c.get("triggerBatchId"):
+                                conn.execute(
+                                    "INSERT OR REPLACE INTO followup_resolutions(id, game, rule_id, trigger_batch_id, status, created_at) "
+                                    "VALUES (?,?,?,?,?,?)",
+                                    (new_id("fres"), game, c["ruleId"], c["triggerBatchId"], "dismissed", now_iso()),
+                                )
                     remaining_ob = [
                         c for c in items if c.get("triggerGroup") == "onboarding" and c.get("state") in ("suggested", "changed")
                     ]

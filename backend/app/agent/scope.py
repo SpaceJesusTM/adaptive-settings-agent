@@ -64,7 +64,12 @@ _ACTION_SEEKING_RE = re.compile(
     re.I,
 )
 _PREF_ONLY_RE = re.compile(
-    r"\b(i (prefer|care more about|care about|value|would rather|'d rather|don't care about|do not care about))\b",
+    r"\b(i (prefer|care more about|care about|value|would rather|'d rather|don't care about|do not care about)|"
+    r"remember(?: that)?|don't forget|from now on)\b",
+    re.I,
+)
+_SPECULATIVE_RE = re.compile(
+    r"\b(might try|maybe try|thinking about|considering|not sure yet|what if i|might want|curious about)\b",
     re.I,
 )
 
@@ -106,7 +111,19 @@ def classify_scope(
     lower = text.lower()
     dims = list(dict.fromkeys(detected_dims or []))
 
-    # Pure explanation / navigation / preference-only statements NEVER auto-stage, even under UI overrides.
+    # Pure explanation / navigation / speculative / preference-only statements NEVER auto-stage, even under UI overrides.
+    if _SPECULATIVE_RE.search(lower) and not re.search(r"\b(remember|from now on|always)\b", lower):
+        return ScopePlan(
+            scope="explain_only",
+            max_recs=0,
+            auto_stage=False,
+            include_minor=False,
+            is_supplement=False,
+            reason="Tentative or exploratory remark: clarify gently without saving goals or staging settings.",
+            inferred_dimensions=[],
+            explicit_override=scope_override,
+        )
+
     if _EXPLAIN_ONLY_RE.search(lower) and not _ACTION_SEEKING_RE.search(lower):
         return ScopePlan(
             scope="explain_only",
@@ -126,7 +143,7 @@ def classify_scope(
             auto_stage=False,
             include_minor=False,
             is_supplement=False,
-            reason="Preference statement: confirm preference first rather than staging settings automatically.",
+            reason="Preference statement: handle preference memory cleanly without staging settings automatically.",
             inferred_dimensions=dims,
             explicit_override=scope_override,
         )

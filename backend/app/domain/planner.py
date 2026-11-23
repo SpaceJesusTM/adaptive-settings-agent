@@ -91,6 +91,7 @@ def build_coverage_audit(
 
     candidates: list[dict[str, Any]] = []
     already_aligned: list[tuple[float, int, dict[str, Any]]] = []
+    tradeoff_retained: list[tuple[float, int, dict[str, Any]]] = []
     already_staged: list[dict[str, Any]] = []
     locked_items: list[dict[str, Any]] = []
     unavailable_items: list[dict[str, Any]] = []
@@ -107,6 +108,7 @@ def build_coverage_audit(
                 "evaluated": 0,
                 "eligible": 0,
                 "alreadyAligned": 0,
+                "tradeoffRetained": 0,
                 "alreadyStaged": 0,
                 "locked": 0,
                 "unavailable": 0,
@@ -200,7 +202,7 @@ def build_coverage_audit(
             scored.append((w * BASIS_FACTOR.get(h.basis, 0.8), h, target))
 
         if not scored:
-            if satisfied_dims or not skipped_minor:
+            if satisfied_dims:
                 cat_bucket["alreadyAligned"] += 1
                 sat_hint = next((h for h in relevant_hints if h.dimension in satisfied_dims), relevant_hints[0])
                 sat_weight = max((positive[d]["weight"] for d in satisfied_dims), default=0.5)
@@ -221,18 +223,20 @@ def build_coverage_audit(
                     },
                 ))
             else:
+                # Only minor secondary-only tweaks skipped or no valid non-current target
                 not_relevant_count += 1
             continue
 
         scored.sort(key=lambda t: -t[0])
         best_score, best_hint, target = scored[0]
 
-        # Do not override a higher-or-equal priority dimension that the current value already satisfies
+        # Do not override a higher-or-equal priority dimension that the current value already satisfies:
+        # surface honestly as retained due to priority trade-off rather than "already aligned with everything".
         if any(positive[d]["weight"] >= positive[best_hint.dimension]["weight"] for d in satisfied_dims):
-            cat_bucket["alreadyAligned"] += 1
+            cat_bucket["tradeoffRetained"] += 1
             sat_dim = max(satisfied_dims, key=lambda d: positive[d]["weight"])
             sat_hint = next((h for h in relevant_hints if h.dimension == sat_dim), best_hint)
-            already_aligned.append((
+            tradeoff_retained.append((
                 positive[sat_dim]["weight"],
                 s.order,
                 {
@@ -241,9 +245,14 @@ def build_coverage_audit(
                     "path": s.canonicalPath,
                     "category": s.category,
                     "currentDisplay": display_value(s, current),
-                    "dimension": sat_hint.dimension,
-                    "dimensionLabel": DIMENSION_LABELS.get(sat_hint.dimension, sat_hint.dimension),
-                    "why": sat_hint.why,
+                    "retainedForDimension": sat_dim,
+                    "retainedForLabel": DIMENSION_LABELS.get(sat_dim, sat_dim),
+                    "competingDimension": best_hint.dimension,
+                    "competingLabel": DIMENSION_LABELS.get(best_hint.dimension, best_hint.dimension),
+                    "reason": (
+                        f"Kept at {display_value(s, current)} because {DIMENSION_LABELS.get(sat_dim, sat_dim)} "
+                        f"takes priority over {DIMENSION_LABELS.get(best_hint.dimension, best_hint.dimension)} ({sat_hint.why})"
+                    ),
                     "whatItDoes": s.description,
                     "tradeoffs": s.riskOrTradeoffs,
                 },
@@ -251,6 +260,7 @@ def build_coverage_audit(
             continue
 
         conflicts = []
+        opposing_dims: list[str] = []
         for h in s.goalHints:
             if h.dimension == best_hint.dimension:
                 continue
@@ -260,10 +270,12 @@ def build_coverage_audit(
                 conflicts.append(f"You also prioritize {DIMENSION_LABELS[h.dimension]}: {h.why}")
             if w_other < 0 and prefers_target:
                 best_score += w_other
+                opposing_dims.append(h.dimension)
         if best_score <= 0:
-            cat_bucket["alreadyAligned"] += 1
-            already_aligned.append((
-                0.4,
+            cat_bucket["tradeoffRetained"] += 1
+            ret_dim = opposing_dims[0] if opposing_dims else best_hint.dimension
+            tradeoff_retained.append((
+                0.5,
                 s.order,
                 {
                     "settingId": s.id,
@@ -271,9 +283,14 @@ def build_coverage_audit(
                     "path": s.canonicalPath,
                     "category": s.category,
                     "currentDisplay": display_value(s, current),
-                    "dimension": best_hint.dimension,
-                    "dimensionLabel": DIMENSION_LABELS.get(best_hint.dimension, best_hint.dimension),
-                    "why": best_hint.why,
+                    "retainedForDimension": ret_dim,
+                    "retainedForLabel": DIMENSION_LABELS.get(ret_dim, ret_dim),
+                    "competingDimension": best_hint.dimension,
+                    "competingLabel": DIMENSION_LABELS.get(best_hint.dimension, best_hint.dimension),
+                    "reason": (
+                        f"Kept at {display_value(s, current)} due to competing preference weight on "
+                        f"{DIMENSION_LABELS.get(ret_dim, ret_dim)} against {DIMENSION_LABELS.get(best_hint.dimension, best_hint.dimension)}."
+                    ),
                     "whatItDoes": s.description,
                     "tradeoffs": s.riskOrTradeoffs,
                 },
@@ -311,7 +328,9 @@ def build_coverage_audit(
 
     candidates.sort(key=lambda c: (-c["score"], c["order"]))
     already_aligned.sort(key=lambda t: (-t[0], t[1]))
+    tradeoff_retained.sort(key=lambda t: (-t[0], t[1]))
     aligned_list = [item for _, _, item in already_aligned]
+    tradeoff_list = [item for _, _, item in tradeoff_retained]
 
     if scope_plan.scope == "focused":
         cap_aligned, cap_manual, cap_status = 3, 2, 2
@@ -324,6 +343,7 @@ def build_coverage_audit(
         "evaluatedCount": evaluated_count,
         "eligibleCount": len(candidates),
         "alreadyAlignedCount": len(aligned_list),
+        "tradeoffRetainedCount": len(tradeoff_list),
         "alreadyStagedCount": len(already_staged),
         "lockedCount": len(locked_items),
         "unavailableCount": len(unavailable_items),
@@ -332,6 +352,7 @@ def build_coverage_audit(
         "byCategory": by_category,
         "candidates": candidates,
         "alreadyAlignedItems": aligned_list[:cap_aligned],
+        "tradeoffRetainedItems": tradeoff_list[:cap_aligned],
         "alreadyStagedItems": already_staged,
         "lockedItems": locked_items[:cap_status],
         "unavailableItems": unavailable_items[:cap_status],

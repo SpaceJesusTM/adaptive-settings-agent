@@ -11,8 +11,10 @@ import re
 from typing import Any, Optional
 
 from ..catalog.schema import DIMENSION_LABELS, Setting
+from ..domain.profile import PERSONAL_FACT_TYPES
 from ..domain.store import Store
 from ..domain.values import ValueError_, availability_problem, display_value, normalize_value, values_equal
+from .intent import classify, detect_dimensions, is_goal_statement, is_speculative
 from .schemas import AssistantDraft
 
 MAX_RECOMMENDATIONS = 3
@@ -71,6 +73,7 @@ def validate_draft(
     source: str,
     max_recommendations: int = MAX_RECOMMENDATIONS,
     scope_plan: Optional[Any] = None,
+    message: str = "",
 ) -> dict[str, Any]:
     conn = store.connect()
     try:
@@ -189,31 +192,100 @@ def validate_draft(
         else:
             navigate = {"settingId": s.id, "label": s.exactLabel, "path": s.canonicalPath, "tabId": s.tabId, "subtabId": s.subtabId}
 
+    speculative = bool(message and is_speculative(message))
+    neutral_explain = bool(
+        draft.intent in ("explain", "navigate")
+        or (message and classify(message) in ("explain", "navigate") and not is_goal_statement(message))
+    )
+
     prefs = []
-    for p in draft.preference_suggestions[:2]:
-        if (p.dimension, p.direction) in saved_prefs:
-            notes.append(f"Skipped a suggestion to save “{DIMENSION_LABELS.get(p.dimension, p.dimension)}” — it is already saved.")
-            continue
-        if p.dimension in DIMENSION_LABELS:
-            prefs.append({"dimension": p.dimension, "dimensionLabel": DIMENSION_LABELS[p.dimension], "direction": p.direction,
-                          "scope": p.scope, "quote": _clean(p.user_quote, 200), "game": game})
+    if not speculative and not neutral_explain:
+        for p in draft.preference_suggestions[:2]:
+            if (p.dimension, p.direction) in saved_prefs:
+                notes.append(f"Skipped a suggestion to save “{DIMENSION_LABELS.get(p.dimension, p.dimension)}” — it is already saved.")
+                continue
+            if p.dimension in DIMENSION_LABELS:
+                prefs.append({"dimension": p.dimension, "dimensionLabel": DIMENSION_LABELS[p.dimension], "direction": p.direction,
+                              "scope": p.scope, "quote": _clean(p.user_quote, 200), "game": game})
+    elif draft.preference_suggestions:
+        notes.append("Treated tentative or informational question without proposing preference changes.")
+
+    memory_actions = []
+    if not speculative and not (message and classify(message) == "navigate"):
+        for m in getattr(draft, "explicit_memory_actions", [])[:3]:
+            target_g = m.game if m.game in ("valorant", "cs2") else game
+            quote = _clean(m.user_quote, 180)
+            if m.kind == "preference" and m.dimension in DIMENSION_LABELS:
+                memory_actions.append({
+                    "kind": "preference",
+                    "dimension": m.dimension,
+                    "dimensionLabel": DIMENSION_LABELS[m.dimension],
+                    "direction": m.direction if m.direction in ("prioritize", "deprioritize") else "prioritize",
+                    "scope": m.scope if m.scope in ("session", "durable") else "durable",
+                    "game": target_g,
+                    "quote": quote,
+                })
+            elif m.kind == "fact" and m.fact_key in PERSONAL_FACT_TYPES and m.value_text:
+                val_txt = _clean(m.value_text, 80)
+                if val_txt:
+                    memory_actions.append({
+                        "kind": "fact",
+                        "factKey": m.fact_key,
+                        "valueText": val_txt,
+                        "scope": "durable",
+                        "game": target_g,
+                        "quote": quote,
+                    })
+    elif getattr(draft, "explicit_memory_actions", None):
+        notes.append("Did not save memory from a speculative remark.")
+
+    # Do not duplicate explicit memory updates inside confirmation chips
+    if memory_actions and prefs:
+        explicit_dims = {(m["dimension"], m["direction"]) for m in memory_actions if m["kind"] == "preference"}
+        prefs = [p for p in prefs if (p["dimension"], p["direction"]) not in explicit_dims]
 
     reply = _clean(draft.reply, 1800)
     reply = _drop_numeric_claims(reply, notes, "the reply")
     if CLAIMED_ACTION_RE.search(reply):
         notes.append("The reply claimed an action; nothing has been changed - suggestions only take effect when you apply them.")
     if not reply:
-        reply = "Here is what I found." if (recs or explanations) else "I could not produce a reliable answer for that."
+        reply = "Here is what I found." if (recs or explanations or memory_actions) else "I could not produce a reliable answer for that."
+
+    valid_goal_dims = [d for d in dict.fromkeys(draft.goal_dimensions) if d in DIMENSION_LABELS][:5]
+    explicit_pref_turn = bool(memory_actions and draft.intent == "preference")
+    if speculative or (neutral_explain and not recs) or explicit_pref_turn:
+        valid_goal_dims = []
+    elif not valid_goal_dims and draft.intent != "clarify":
+        # Backfill goal dimensions when a local model supplies recommendations or goal phrasing without goal_dimensions.
+        candidates_dims: list[str] = []
+        if scope_plan is not None:
+            candidates_dims.extend(getattr(scope_plan, "inferred_dimensions", []) or [])
+        if message and is_goal_statement(message):
+            candidates_dims.extend(detect_dimensions(message))
+        candidates_dims.extend(p["dimension"] for p in prefs if p.get("direction") == "prioritize")
+        if draft.intent == "recommend":
+            candidates_dims.extend(r["dimension"] for r in recs if r.get("dimension"))
+        valid_goal_dims = [d for d in dict.fromkeys(candidates_dims) if d in DIMENSION_LABELS][:5]
+
+    goal_changed = bool(
+        (getattr(draft, "goal_changed", False) or (message and is_goal_statement(message, valid_goal_dims)))
+        and valid_goal_dims
+        and not speculative
+        and not neutral_explain
+        and not explicit_pref_turn
+    )
 
     return {
         "intent": draft.intent,
         "reply": reply,
         "knownsAndUnknowns": _drop_numeric_claims(_clean(draft.knowns_and_unknowns, 450), notes, "the uncertainty note") or None,
-        "goalDimensions": [d for d in dict.fromkeys(draft.goal_dimensions) if d in DIMENSION_LABELS][:5],
+        "goalDimensions": valid_goal_dims,
+        "goalChanged": goal_changed,
         "recommendations": recs,
         "explanations": explanations,
         "navigateTo": navigate,
         "preferenceSuggestions": prefs,
+        "explicitMemoryActions": memory_actions,
         "clarifyingQuestion": _clean(draft.clarifying_question, 300) or None,
         "filtered": filtered,
         "validationNotes": notes,

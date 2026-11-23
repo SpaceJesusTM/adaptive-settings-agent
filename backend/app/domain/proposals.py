@@ -13,7 +13,7 @@ from typing import Any, Optional
 from ..catalog.schema import DIMENSION_LABELS
 from .db import dumps, loads, new_id, now_iso, write_tx
 from .errors import Conflict, Invalid, NotFound
-from .profile import ProfileService
+from .profile import CONFLICT_PAIRS, ProfileService
 from .store import Change, Store
 from .values import ValueError_, availability_problem, display_value, normalize_value, values_equal
 
@@ -72,12 +72,56 @@ class ProposalService:
                 "confidence": r["confidence"], "dimensions": loads(r["dimensions_json"], []), "basedOn": r["based_on"],
             })
         keys = set(p.keys())
+        plan_obj = loads(p["plan_json"], None) if "plan_json" in keys else None
+        ctx_snap = loads(p["context_snapshot_json"], None) if "context_snapshot_json" in keys else None
+
+        freshness_status = "consistent"
+        freshness_warning: Optional[str] = None
+        if p["status"] == "pending":
+            cur_goals = self.profile.session_goals(conn, game)
+            cur_goal = cur_goals[0] if cur_goals else None
+            snap_goal_dims = list((ctx_snap or {}).get("goalDimensions") or (plan_obj or {}).get("inferredDimensions") or [])
+            snap_goal_text = (ctx_snap or {}).get("goalText")
+            item_dims = list(dict.fromkeys(d for it in items if it["status"] == "pending" for d in it.get("dimensions", [])))
+            compare_dims = snap_goal_dims or item_dims
+
+            if p["source"] == "history" and (item_dims or (plan_obj or {}).get("inferredDimensions")) and cur_goal:
+                hist_dims = item_dims or list((plan_obj or {}).get("inferredDimensions") or [])
+                cur_dims = set(cur_goal.get("dimensions") or [])
+                has_conflict = any(set(CONFLICT_PAIRS.get(cd, ())) & set(hist_dims) for cd in cur_dims)
+                if has_conflict or (cur_dims and not (cur_dims & set(hist_dims))):
+                    freshness_status = "historical_preference"
+                    freshness_warning = (
+                        f"Restaged from an earlier setup targeting {', '.join(DIMENSION_LABELS.get(d, d) for d in hist_dims[:2])}. "
+                        f"Your current goal focuses on {', '.join(DIMENSION_LABELS.get(d, d) for d in cur_goal['dimensions'][:2])} — review carefully before applying."
+                    )
+            elif cur_goal and compare_dims:
+                cur_dims = set(cur_goal.get("dimensions") or [])
+                has_conflict = any(set(CONFLICT_PAIRS.get(cd, ())) & set(compare_dims) for cd in cur_dims)
+                shifted = bool(cur_dims) and not (cur_dims & set(compare_dims))
+                if has_conflict or shifted or (snap_goal_text and cur_goal.get("text") and snap_goal_text != cur_goal["text"] and has_conflict):
+                    freshness_status = "outdated_goal"
+                    prior_desc = f"“{snap_goal_text}”" if snap_goal_text else ", ".join(DIMENSION_LABELS.get(d, d) for d in compare_dims[:2])
+                    cur_desc = f"“{cur_goal['text']}”" if cur_goal.get("text") else ", ".join(DIMENSION_LABELS.get(d, d) for d in cur_goal["dimensions"][:2])
+                    freshness_warning = (
+                        f"Prepared when your goal was {prior_desc}. Your current goal favors {cur_desc}. "
+                        "Review these recommendations or reject them before applying."
+                    )
+
+            if freshness_status == "consistent" and any(it["stale"] for it in items if it["status"] == "pending"):
+                freshness_status = "technically_stale"
+                freshness_warning = "One or more settings in this draft changed since staging; rebase or uncheck stale items before applying."
+
         return {"id": p["id"], "game": game, "source": p["source"], "sourceLabel": SOURCE_LABELS.get(p["source"], p["source"]),
                 "runId": p["run_id"], "title": p["title"], "status": p["status"], "createdAt": p["created_at"],
                 "updatedAt": p["updated_at"], "appliedBatchId": p["applied_batch_id"],
                 "autoStaged": bool(p["auto_staged"]) if "auto_staged" in keys else False,
                 "restagedFromBatchId": p["restaged_from_batch_id"] if "restaged_from_batch_id" in keys else None,
-                "plan": loads(p["plan_json"], None) if "plan_json" in keys else None,
+                "generatedGoalText": (ctx_snap or {}).get("goalText"),
+                "generatedGoalDimensions": list((ctx_snap or {}).get("goalDimensions") or []),
+                "freshnessStatus": freshness_status,
+                "freshnessWarning": freshness_warning,
+                "plan": plan_obj,
                 "items": items}
 
     def list(self, game: str, status: Optional[str] = None) -> list[dict[str, Any]]:
@@ -158,12 +202,13 @@ class ProposalService:
                                 (it.get("tradeoff") or None), it.get("confidence"), dumps(dims),
                                 (it.get("basedOn") or None)))
         any_pending = any(r[8] == "pending" for r in staged_rows)
+        ctx_snap = self.profile.snapshot_context(conn, game)
         conn.execute(
             "INSERT INTO proposals(id, game, source, run_id, title, status, condition, session_id, created_at, updated_at, "
-            "plan_json, auto_staged, restaged_from_batch_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "plan_json, auto_staged, restaged_from_batch_id, context_snapshot_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (pid, game, source, run_id, (title or "Suggested changes")[:120], "pending" if any_pending else "closed",
              sess.get("condition"), sess.get("sessionId"), ts, ts, dumps(plan) if plan is not None else None,
-             1 if auto_staged else 0, restaged_from_batch_id),
+             1 if auto_staged else 0, restaged_from_batch_id, dumps(ctx_snap)),
         )
         conn.executemany(
             "INSERT INTO proposal_items(id, proposal_id, position, setting_id, baseline_value_json, baseline_revision, "
@@ -336,16 +381,24 @@ class ProposalService:
                     })
                     continue
 
+                derived_dims = loads(pit["dimensions_json"], []) if pit else []
+                if not derived_dims:
+                    derived_dims = [
+                        h.dimension
+                        for h in s.goalHints
+                        if any(values_equal(normalized_target, v) for v in h.prefer)
+                    ]
                 stage_items.append({
                     "settingId": s.id,
                     "proposedValue": normalized_target,
                     "why": pit["why"] if pit and pit["why"] else None,
                     "tradeoff": pit["tradeoff"] if pit and pit["tradeoff"] else s.riskOrTradeoffs,
                     "confidence": pit["confidence"] if pit and pit["confidence"] else None,
-                    "dimensions": loads(pit["dimensions_json"], []) if pit else [],
+                    "dimensions": list(dict.fromkeys(derived_dims)),
                     "basedOn": pit["based_on"] if pit and pit["based_on"] else fallback_basis,
                 })
 
+            hist_inferred = list(dict.fromkeys(d for it in stage_items for d in it.get("dimensions", [])))
             plan_meta = {
                 "scope": "focused" if len(evs) <= 3 else "broad_optimization",
                 "maxRecommendations": len(evs),
@@ -355,7 +408,7 @@ class ProposalService:
                     f"Restaged from {origin_label} ({created_day}). "
                     f"{len(stage_items)} change(s) ready to review, {len(already_aligned)} already matching that configuration."
                 ),
-                "inferredDimensions": [],
+                "inferredDimensions": hist_inferred,
                 "autoStage": False,
                 "partialCoverage": False,
                 "batchesCompleted": 1,

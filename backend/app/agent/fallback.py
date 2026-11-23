@@ -9,20 +9,23 @@ import re
 from typing import Any, Optional
 
 from ..catalog.schema import DIMENSION_LABELS
-from ..domain.cross_game import compare_cross_game
+from ..domain.cross_game import compare_cross_game, parse_cross_game_direction
 from ..domain.planner import build_coverage_audit
-from ..domain.profile import ProfileService
+from ..domain.profile import PERSONAL_FACT_TYPES, ProfileService
 from ..domain.store import Store
 from .intent import (
     classify,
     detect_dimensions,
+    detect_explicit_memory,
     extract_sensitivity_number,
     is_cross_game_query,
+    is_goal_statement,
+    is_speculative,
     mentioned_setting_terms,
     preference_direction_for,
     preference_scope,
 )
-from .schemas import AssistantDraft, DraftExplanation, DraftPreference, DraftRecommendation
+from .schemas import AssistantDraft, DraftExplanation, DraftMemoryAction, DraftPreference, DraftRecommendation
 from .scope import ScopePlan, classify_scope
 from .tools import ToolContext, search_settings
 
@@ -95,6 +98,34 @@ def fallback_turn(
         explicit_override=scope_override,
     )
 
+    if is_speculative(message):
+        return (
+            AssistantDraft(
+                intent="clarify",
+                reply=(
+                    "That sounds tentative, so I haven't saved any goals or preferences or staged any changes yet."
+                ),
+                clarifying_question="Would you like recommendations for that direction, or are you still deciding?",
+            ),
+            no_stage_scope,
+            audit,
+        )
+
+    mem_actions_raw = detect_explicit_memory(message, game)
+    mem_drafts = [
+        DraftMemoryAction(
+            kind=m["kind"],
+            dimension=m.get("dimension"),
+            direction=m.get("direction", "prioritize"),
+            fact_key=m.get("factKey"),
+            value_text=m.get("valueText"),
+            scope=m.get("scope", "durable"),
+            game=m.get("game"),
+            user_quote=m.get("quote", ""),
+        )
+        for m in mem_actions_raw
+    ]
+
     if re.search(r"\bwhy (those|these|did you|that)\b", lower):
         return (
             AssistantDraft(
@@ -131,6 +162,7 @@ def fallback_turn(
         )
 
     if is_cross_game_query(message):
+        src_g, tgt_g, _ = parse_cross_game_direction(message, game)
         conn_cg = store.connect()
         try:
             cg = compare_cross_game(
@@ -140,6 +172,8 @@ def fallback_turn(
                 query=message,
                 current_game=game,
                 source_sensitivity=extract_sensitivity_number(message),
+                source_game=src_g,
+                target_game=tgt_g,
             )
         finally:
             conn_cg.close()
@@ -153,10 +187,12 @@ def fallback_turn(
             if comps:
                 first = comps[0]
                 reply_parts = [f"{first['topic']} ({first['relationshipLabel']}): {first['summary']}"]
+                if first.get("discrepancyNote"):
+                    reply_parts.append(first["discrepancyNote"])
                 conv = first.get("sensitivityConversion")
                 if conv and conv.get("convertible"):
                     reply_parts.append(
-                        f"360° starting point: {conv['formula']}. {conv['caveats'][0]}"
+                        f"360° starting point ({conv.get('sourceGame', '').upper()} -> {conv.get('targetGame', '').upper()}): {conv['formula']}. {conv['caveats'][0]}"
                     )
                 elif conv:
                     reply_parts.append(conv.get("reason", ""))
@@ -166,11 +202,12 @@ def fallback_turn(
                     # Combine cross-game comparison cards with priority-based safe recommendations
                     pass
                 else:
+                    nav_id = first.get("targetNavigateId") if first.get("targetNavigateGame", game) == game else None
                     return (
                         AssistantDraft(
                             intent="explain",
                             reply=" ".join(p for p in reply_parts if p)[:1600],
-                            navigate_to=first.get("targetNavigateId"),
+                            navigate_to=nav_id,
                             knowns_and_unknowns=first.get("differences"),
                         ),
                         no_stage_scope,
@@ -187,6 +224,24 @@ def fallback_turn(
                     audit,
                 )
 
+    if mem_drafts and not re.search(r"\b(change|configure|set up|optimi[sz]e|recommend|suggest|what should i)\b", lower):
+        saved_labels = []
+        for md in mem_drafts:
+            if md.kind == "fact" and md.fact_key in PERSONAL_FACT_TYPES:
+                saved_labels.append(f"{PERSONAL_FACT_TYPES[md.fact_key]['label']} in {(md.game or game).upper()}: {md.value_text}")
+            elif md.kind == "preference" and md.dimension in DIMENSION_LABELS:
+                saved_labels.append(f"{md.direction} {DIMENSION_LABELS[md.dimension]} ({md.scope})")
+        return (
+            AssistantDraft(
+                intent="preference",
+                reply=f"Got it — I've noted {'; '.join(saved_labels)} in System Understanding (you can undo below if needed). Nothing in the menu was changed.",
+                explicit_memory_actions=mem_drafts,
+                preference_suggestions=[],
+            ),
+            no_stage_scope,
+            audit,
+        )
+
     if intent == "explain":
         term = mentioned_setting_terms(message) or message
         hits = search_settings(ctx, term, limit=2)["results"]
@@ -199,6 +254,8 @@ def fallback_turn(
                     reply=f"Here is what the catalogue says about {s.exactLabel} ({s.canonicalPath}).",
                     explanations=[DraftExplanation(setting_id=s.id, explanation=text)],
                     navigate_to=s.id,
+                    goal_dimensions=[],
+                    goal_changed=False,
                 ),
                 no_stage_scope,
                 audit,
@@ -380,7 +437,9 @@ def fallback_turn(
             AssistantDraft(
                 intent="recommend",
                 goal_dimensions=eff_dims[:5],
+                goal_changed=is_goal_statement(message, eff_dims[:5]),
                 recommendations=recs,
+                explicit_memory_actions=mem_drafts,
                 reply=(
                     f"Reviewed {audit['evaluatedCount']} settings for {goal} and prepared {len(recs)} change(s) "
                     f"across {cat_text} ({audit['alreadyAlignedCount']} already aligned). Nothing has been applied yet."

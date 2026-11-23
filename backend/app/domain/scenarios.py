@@ -20,10 +20,11 @@ from .values import ValueError_, normalize_value
 ALL_TABLES = [
     "setting_values", "game_state", "change_events", "change_batches", "pins", "locks", "proposal_items",
     "proposals", "preferences", "evidence", "session_goals", "dismissals", "relevant_now", "context_events",
-    "chat_messages", "agent_runs", "valorant_crosshair_profiles", "personal_setup_facts", "onboarding_state", "kv",
+    "chat_messages", "agent_runs", "valorant_crosshair_profiles", "personal_setup_facts", "onboarding_state",
+    "followup_resolutions", "kv",
 ]
 AI_TABLES = ["proposal_items", "proposals", "relevant_now", "chat_messages", "agent_runs", "context_events",
-             "session_goals", "dismissals"]
+             "session_goals", "dismissals", "followup_resolutions"]
 
 
 def list_scenarios(scenario_dir: Path) -> list[dict[str, Any]]:

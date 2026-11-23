@@ -12,6 +12,7 @@ from ..catalog.schema import DIMENSION_LABELS
 from ..domain.cross_game import compare_cross_game
 from ..domain.db import write_tx
 from ..domain.errors import Conflict, Invalid
+from ..domain.observations import build_observed_summary
 from ..domain.profile import CONTEXT_EVENTS, PERSONAL_FACT_TYPES
 from ..domain.scenarios import export_state, import_state, list_scenarios, reset, write_backup
 from ..domain.store import Change
@@ -259,16 +260,37 @@ def search(game: str, request: Request, q: str = Query(min_length=1, max_length=
 
 # ----------------------------------------------------------------------------------- manual changes, history
 
+def _sync_discover_event(s: Services, game: Optional[str], trigger: str) -> None:
+    if not game:
+        return
+    conn = s.store.connect()
+    try:
+        sess = s.store.session(conn)
+        adaptive = sess.get("condition") == "adaptive" and bool(sess.get("adaptationEnabled", True))
+    finally:
+        conn.close()
+    if adaptive:
+        s.relevant_now.sync_on_event(game, trigger)
+
+
 @router.put("/games/{game}/settings/{setting_id}")
 def change_setting(game: str, setting_id: str, body: SettingChangeIn, request: Request) -> dict[str, Any]:
-    return svc(request).store.manual_change(game, [Change(setting_id, body.value, body.expectedRevision)],
-                                            client_request_id=body.clientRequestId)
+    s = svc(request)
+    res = s.store.manual_change(game, [Change(setting_id, body.value, body.expectedRevision)],
+                                client_request_id=body.clientRequestId)
+    if not res.get("noop"):
+        _sync_discover_event(s, game, "followup")
+    return res
 
 
 @router.post("/games/{game}/batch")
 def change_batch(game: str, body: BatchIn, request: Request) -> dict[str, Any]:
-    return svc(request).store.manual_change(game, [Change(c.settingId, c.value, c.expectedRevision) for c in body.changes],
-                                            client_request_id=body.clientRequestId, label=body.label)
+    s = svc(request)
+    res = s.store.manual_change(game, [Change(c.settingId, c.value, c.expectedRevision) for c in body.changes],
+                                client_request_id=body.clientRequestId, label=body.label)
+    if not res.get("noop"):
+        _sync_discover_event(s, game, "followup")
+    return res
 
 
 @router.get("/games/{game}/history")
@@ -278,7 +300,10 @@ def history(game: str, request: Request, limit: int = Query(default=100, ge=1, l
 
 @router.post("/history/{batch_id}/undo")
 def undo(batch_id: str, body: UndoIn, request: Request) -> dict[str, Any]:
-    return svc(request).store.undo_batch(batch_id, client_request_id=body.clientRequestId)
+    s = svc(request)
+    res = s.store.undo_batch(batch_id, client_request_id=body.clientRequestId)
+    _sync_discover_event(s, res.get("game"), "undo")
+    return res
 
 
 @router.post("/history/{batch_id}/restage")
@@ -383,7 +408,11 @@ def rebase_item(proposal_id: str, item_id: str, request: Request) -> dict[str, A
 def apply_proposal(proposal_id: str, body: ApplyIn, request: Request) -> dict[str, Any]:
     s = svc(request)
     require_adaptive(s)
-    return s.proposals.apply(proposal_id, body.itemIds, body.idempotencyKey)
+    res = s.proposals.apply(proposal_id, body.itemIds, body.idempotencyKey)
+    batch_game = (res.get("batch") or {}).get("game") or (res.get("proposal") or {}).get("game")
+    if not res.get("idempotentReplay"):
+        _sync_discover_event(s, batch_game, "followup")
+    return res
 
 
 @router.post("/proposals/{proposal_id}/reject")
@@ -487,6 +516,8 @@ def cross_game_compare(
     game: Literal["valorant", "cs2"] = "cs2",
     q: str = Query(min_length=1, max_length=200),
     sourceSensitivity: Optional[float] = None,
+    sourceGame: Optional[Literal["valorant", "cs2"]] = None,
+    targetGame: Optional[Literal["valorant", "cs2"]] = None,
 ) -> dict[str, Any]:
     s = svc(request)
     conn = s.store.connect()
@@ -498,6 +529,8 @@ def cross_game_compare(
             query=q,
             current_game=game,
             source_sensitivity=sourceSensitivity,
+            source_game=sourceGame,
+            target_game=targetGame,
         )
     finally:
         conn.close()
@@ -524,10 +557,11 @@ def set_context_event(body: ContextEventIn, request: Request) -> dict[str, Any]:
 # ----------------------------------------------------------------------------------- profile
 
 @router.get("/profile")
-def profile(request: Request) -> dict[str, Any]:
+def profile(request: Request, game: Optional[Literal["valorant", "cs2"]] = None) -> dict[str, Any]:
     s = svc(request)
     conn = s.store.connect()
     try:
+        active_game = game or s.store.session(conn).get("selectedGame", "valorant")
         return {
             "preferences": s.profile.preferences(conn),
             "personalFacts": s.profile.personal_facts(conn),
@@ -537,6 +571,7 @@ def profile(request: Request) -> dict[str, Any]:
             "context": {g: s.profile.active_context(conn, g) for g in s.registry.games},
             "evidence": s.profile.evidence(conn, 40),
             "dimensions": [{"id": k, "label": v} for k, v in DIMENSION_LABELS.items()],
+            "observed": build_observed_summary(s.store, s.profile, conn, active_game),
         }
     finally:
         conn.close()

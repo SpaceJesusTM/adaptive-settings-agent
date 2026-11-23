@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -237,6 +237,20 @@ MIGRATIONS: dict[int, str] = {
         completed_checks_json TEXT NOT NULL DEFAULT '[]',
         dismissed_checks_json TEXT NOT NULL DEFAULT '[]',
         updated_at TEXT NOT NULL
+    );
+    """,
+    4: """
+    ALTER TABLE proposals ADD COLUMN context_snapshot_json TEXT;
+    ALTER TABLE evidence ADD COLUMN preference_id TEXT;
+
+    CREATE TABLE IF NOT EXISTS followup_resolutions (
+        id TEXT PRIMARY KEY,
+        game TEXT NOT NULL,
+        rule_id TEXT NOT NULL,
+        trigger_batch_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(game, rule_id, trigger_batch_id)
     );
     """,
 }

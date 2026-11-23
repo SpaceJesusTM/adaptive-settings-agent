@@ -7,11 +7,13 @@ or proposed as silent edits across games.
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 from typing import Any, Literal, Optional
 
 from ..catalog.loader import CatalogRegistry, coerce_number
 from ..catalog.schema import DIMENSION_LABELS
+from .observations import detect_fact_discrepancies, observe_setting
 from .profile import ProfileService
 from .store import Store
 from .values import display_value
@@ -34,6 +36,55 @@ RELATIONSHIP_LABELS: dict[str, str] = {
     "not_directly_comparable": "Not directly comparable",
 }
 
+
+def parse_cross_game_direction(query: str, current_game: str) -> tuple[str, str, bool]:
+    """Resolve explicit source and destination games from user text, defaulting to UI context only when ambiguous."""
+    q = (query or "").lower()
+    other = "valorant" if current_game == "cs2" else "cs2"
+    has_val = bool(re.search(r"\bvalorant\b", q))
+    has_cs2 = bool(re.search(r"\bcs2\b|counter-?strike", q))
+
+    if has_val and has_cs2:
+        if re.search(
+            r"\b(?:valorant|my valorant)\b[^?.!]{0,50}\b(?:to|into|in|for|as)\b[^?.!]{0,30}\bcs2\b"
+            r"|\bfrom\s+valorant\b"
+            r"|\bcs2\b[^?.!]{0,40}\b(?:equivalent|counterpart|setting|key|version)\b[^?.!]{0,30}\bvalorant\b"
+            r"|\bwhat\s+(?:in\s+)?cs2\b[^?.!]{0,40}\bvalorant\b",
+            q,
+        ):
+            return "valorant", "cs2", True
+        if re.search(
+            r"\b(?:cs2|counter-?strike)\b[^?.!]{0,50}\b(?:to|into|in|for|as)\b[^?.!]{0,30}\bvalorant\b"
+            r"|\bfrom\s+cs2\b"
+            r"|\bvalorant\b[^?.!]{0,40}\b(?:equivalent|counterpart|setting|key|version)\b[^?.!]{0,30}\bcs2\b"
+            r"|\bwhat\s+(?:in\s+)?valorant\b[^?.!]{0,40}\bcs2\b",
+            q,
+        ):
+            return "cs2", "valorant", True
+
+    if has_val and not has_cs2:
+        if current_game == "valorant":
+            if re.search(r"\b(?:equivalent|carry over|in the other game)\b", q):
+                return "valorant", "cs2", False
+            return "cs2", "valorant", False
+        # Viewing CS2 and asking about VALORANT: distinguish "what was/is it in VALORANT" from "convert my setting to VALORANT"
+        if re.search(r"\b(?:to|into)\s+valorant\b|\bequivalent\s+valorant\b", q):
+            return "cs2", "valorant", True
+        return "valorant", "cs2", True
+
+    if has_cs2 and not has_val:
+        if current_game == "cs2":
+            if re.search(r"\b(?:to|into)\s+cs2\b|\bequivalent\s+cs2\b", q):
+                return "valorant", "cs2", True
+            return "valorant", "cs2", False
+        if re.search(r"\b(?:to|into)\s+cs2\b|\bequivalent\s+cs2\b|\b(?:convert|transfer)\s+(?:my\s+)?cs2\b", q):
+            if re.search(r"\b(?:to|into)\s+cs2\b|\bequivalent\s+cs2\b", q):
+                return "valorant", "cs2", True
+            return "cs2", "valorant", True
+        return "cs2", "valorant", True
+
+    return other, current_game, False
+
 CROSS_GAME_MAPPINGS: list[dict[str, Any]] = [
     {
         "id": "push_to_talk",
@@ -41,7 +92,7 @@ CROSS_GAME_MAPPINGS: list[dict[str, Any]] = [
         "relationship": "similar_with_differences",
         "keywords": [
             "push to talk", "push-to-talk", "ptt", "mic", "microphone", "voice chat",
-            "voice", "comms", "communication key", "same key", "talk",
+            "voice", "comms", "communication key", "same key", "talk", "voice button", "mic key", "talk key",
         ],
         "valorantIds": [
             "val.controls.key_team_ptt",
@@ -71,7 +122,7 @@ CROSS_GAME_MAPPINGS: list[dict[str, Any]] = [
         "relationship": "similar_with_differences",
         "keywords": [
             "sensitivity", "sens", "aim", "dpi", "edpi", "360", "mouse", "cm/360",
-            "scoped", "zoom", "ads",
+            "scoped", "zoom", "ads", "mouse speed", "turn speed", "convert sensitivity", "convert",
         ],
         "valorantIds": [
             "val.general.sensitivity_aim",
@@ -400,14 +451,24 @@ def compare_cross_game(
     query: str,
     current_game: str,
     source_sensitivity: Optional[float] = None,
+    source_game: Optional[str] = None,
+    target_game: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Find grounded cross-game analogies for a query across BOTH VALORANT and CS2 catalogues."""
+    """Find grounded cross-game analogies in an explicit direction using live observed settings."""
     q = (query or "").lower()
-    other_game = "valorant" if current_game == "cs2" else "cs2"
+    if source_game in ("valorant", "cs2") and target_game in ("valorant", "cs2") and source_game != target_game:
+        src_game, tgt_game, explicit_dir = source_game, target_game, True
+    else:
+        src_game, tgt_game, explicit_dir = parse_cross_game_direction(query, current_game)
+
     val_vals = store.flat_values(conn, "valorant")
     cs2_vals = store.flat_values(conn, "cs2")
     facts = profile.personal_facts(conn)
     facts_by_key = {(f["factKey"], f.get("originGame")): f for f in facts}
+    discrepancies = {
+        (d["factKey"], d["game"]): d
+        for d in detect_fact_discrepancies(store, profile, conn)
+    }
     prefs = [p for p in profile.preferences(conn) if p["scope"] == "durable"]
 
     scored: list[tuple[int, dict[str, Any]]] = []
@@ -415,11 +476,17 @@ def compare_cross_game(
         k in q for k in (
             "carry over", "what should i change based on", "move my settings", "new to cs2",
             "new to valorant", "similarities", "setup carry", "from valorant to cs2",
-            "from cs2 to valorant",
+            "from cs2 to valorant", "equivalent", "switch from",
         )
     )
     for m in CROSS_GAME_MAPPINGS:
-        hits = sum(2 if " " in kw else 1 for kw in m["keywords"] if kw in q)
+        hits = 0
+        for kw in m["keywords"]:
+            if " " in kw:
+                if kw in q:
+                    hits += 2
+            elif re.search(rf"\b{re.escape(kw)}\b", q):
+                hits += 1
         if hits > 0 or (broad_transfer and m["id"] in ("push_to_talk", "mouse_sensitivity", "frame_pacing_latency")):
             scored.append((max(1, hits), m))
     scored.sort(key=lambda t: -t[0])
@@ -428,7 +495,10 @@ def compare_cross_game(
         return {
             "matched": False,
             "currentGame": current_game,
-            "otherGame": other_game,
+            "sourceGame": src_game,
+            "targetGame": tgt_game,
+            "otherGame": src_game if tgt_game == current_game else tgt_game,
+            "directionExplicit": explicit_dir,
             "comparisons": [],
             "durablePriorities": [
                 {"dimension": p["dimension"], "label": DIMENSION_LABELS.get(p["dimension"], p["dimension"]), "originGame": p.get("originGame")}
@@ -440,21 +510,36 @@ def compare_cross_game(
             ),
         }
 
+    src_name = "VALORANT" if src_game == "valorant" else "CS2"
+    tgt_name = "VALORANT" if tgt_game == "valorant" else "CS2"
     comparisons: list[dict[str, Any]] = []
     for _, m in scored[:3]:
         val_settings = [x for sid in m["valorantIds"] if (x := _setting_snapshot(store, val_vals, "valorant", sid))]
         cs2_settings = [x for sid in m["cs2Ids"] if (x := _setting_snapshot(store, cs2_vals, "cs2", sid))]
+        src_settings = val_settings if src_game == "valorant" else cs2_settings
+        tgt_settings = cs2_settings if tgt_game == "cs2" else val_settings
+
         matching_facts = []
+        comp_discrepancies = []
         for fk in m.get("personalFactKeys", []):
-            f = facts_by_key.get((fk, other_game)) or facts_by_key.get((fk, None))
+            f = facts_by_key.get((fk, src_game)) or facts_by_key.get((fk, tgt_game)) or facts_by_key.get((fk, None))
             if f:
                 matching_facts.append(f)
+            disc = discrepancies.get((fk, src_game)) or discrepancies.get((fk, tgt_game))
+            if disc:
+                comp_discrepancies.append(disc)
+
+        discrepancy_note = " ".join(d["explanation"] for d in comp_discrepancies) if comp_discrepancies else None
+        primary_src_obs = observe_setting(store, conn, src_game, src_settings[0]["settingId"]) if src_settings else None
 
         item: dict[str, Any] = {
             "id": m["id"],
             "topic": m["topic"],
             "relationship": m["relationship"],
             "relationshipLabel": RELATIONSHIP_LABELS[m["relationship"]],
+            "sourceGame": src_game,
+            "targetGame": tgt_game,
+            "directionExplicit": explicit_dir,
             "summary": m["summary"],
             "differences": m["differences"],
             "safetyNote": m["safetyNote"],
@@ -462,41 +547,66 @@ def compare_cross_game(
             "valorantSettings": val_settings,
             "cs2Settings": cs2_settings,
             "confirmedFacts": matching_facts,
-            "targetNavigateId": (cs2_settings[0]["settingId"] if current_game == "cs2" and cs2_settings else (val_settings[0]["settingId"] if val_settings else None)),
+            "discrepancyNote": discrepancy_note,
+            "sourceEvidence": primary_src_obs["sourceKind"] if primary_src_obs else None,
+            "sourceEvidenceLabel": primary_src_obs["sourceLabel"] if primary_src_obs else None,
+            "targetNavigateGame": tgt_game,
+            "targetNavigateId": tgt_settings[0]["settingId"] if tgt_settings else None,
         }
 
         if m["id"] == "mouse_sensitivity":
+            sens_fact = facts_by_key.get(("mouse_sensitivity", src_game))
+            sens_disc = discrepancies.get(("mouse_sensitivity", src_game))
             if source_sensitivity is not None:
-                item["sensitivityConversion"] = convert_hipfire_sensitivity(
-                    other_game, current_game, source_sensitivity, confirmed=True
+                conv = convert_hipfire_sensitivity(src_game, tgt_game, source_sensitivity, confirmed=True)
+                conv["sourceOrigin"] = "user_message"
+                conv["sourceNote"] = f"Calculated from the {src_name} sensitivity ({source_sensitivity:g}) in your message."
+            elif primary_src_obs and primary_src_obs["value"] is not None:
+                live_val = primary_src_obs["value"]
+                is_deliberate = bool(primary_src_obs["deliberate"])
+                conv = convert_hipfire_sensitivity(
+                    src_game, tgt_game, live_val, confirmed=is_deliberate or bool(sens_fact and not sens_disc)
                 )
-            elif matching_facts:
-                item["sensitivityConversion"] = convert_hipfire_sensitivity(
-                    other_game, current_game, matching_facts[0]["valueText"], confirmed=True
-                )
+                conv["sourceOrigin"] = primary_src_obs["sourceKind"]
+                if sens_disc:
+                    conv["sourceNote"] = (
+                        f"Your saved profile note says {sens_fact['valueText']}, while your current {src_name} setting is "
+                        f"{primary_src_obs['display']} ({primary_src_obs['sourceLabel'].lower()}). Calculation uses current {primary_src_obs['display']}."
+                    )
+                elif sens_fact:
+                    conv["sourceNote"] = f"Uses your confirmed & current {src_name} sensitivity ({primary_src_obs['display']})."
+                elif is_deliberate:
+                    conv["sourceNote"] = f"Observed from the {src_name} sensitivity you set ({primary_src_obs['display']})."
+                else:
+                    conv["sourceNote"] = (
+                        f"Observed from current {src_name} configuration ({primary_src_obs['display']}; "
+                        f"{primary_src_obs['sourceLabel'].lower()}, not asserted as a lasting personal habit)."
+                    )
+            elif sens_fact:
+                conv = convert_hipfire_sensitivity(src_game, tgt_game, sens_fact["valueText"], confirmed=True)
+                conv["sourceOrigin"] = "confirmed_fact"
+                conv["sourceNote"] = f"Calculated from your saved {src_name} preference ({sens_fact['valueText']})."
             else:
-                item["sensitivityConversion"] = {
-                    "convertible": False,
-                    "sourceGame": other_game,
-                    "targetGame": current_game,
-                    "reason": (
-                        f"You have not confirmed your {other_game.upper()} sensitivity in this profile yet. "
-                        f"Share your exact in-game {other_game.upper()} sensitivity (or save it in My Priorities → Personal setup preferences) "
-                        "to calculate a starting 360° value rather than guessing from placeholder defaults."
-                    ),
-                    "assumptions": [
-                        "Same mouse DPI across both games and CS2 default m_yaw = 0.022.",
-                    ],
-                    "caveats": [
-                        "Matches physical 360° hipfire rotation rather than identical FOV/ADS feel.",
-                    ],
-                }
+                conv = convert_hipfire_sensitivity(src_game, tgt_game, None, confirmed=False)
+                conv["sourceOrigin"] = "missing"
+                conv["sourceNote"] = f"No current or confirmed sensitivity found for {src_name}."
+
+            if tgt_settings:
+                conv["currentTargetDisplay"] = tgt_settings[0]["currentDisplay"]
+                conv["targetSettingLabel"] = tgt_settings[0]["label"]
+            item["sensitivityConversion"] = conv
+        elif discrepancy_note:
+            item["summary"] = f"{m['summary']} {discrepancy_note}"
+
         comparisons.append(item)
 
     return {
         "matched": True,
         "currentGame": current_game,
-        "otherGame": other_game,
+        "sourceGame": src_game,
+        "targetGame": tgt_game,
+        "otherGame": src_game if tgt_game == current_game else tgt_game,
+        "directionExplicit": explicit_dir,
         "comparisons": comparisons,
         "durablePriorities": [
             {"dimension": p["dimension"], "label": DIMENSION_LABELS.get(p["dimension"], p["dimension"]), "originGame": p.get("originGame")}

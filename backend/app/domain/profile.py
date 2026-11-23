@@ -87,6 +87,20 @@ class ProfileService:
         self.store = store
 
     # ------------------------------------------------------------------ preferences
+    @staticmethod
+    def _source_category(kind: str, detail: Optional[str] = None) -> str:
+        if detail and "(seeded history)" in detail.lower():
+            return "scenario_seed"
+        return {
+            "preference_set": "explicit_statement",
+            "personal_fact_set": "explicit_statement",
+            "applied": "ai_applied",
+            "manual_change": "manual_change",
+            "rejected": "rejected_or_dismissed",
+            "dismissed": "rejected_or_dismissed",
+            "checked": "user_checked",
+        }.get(kind, "system_observation")
+
     def preferences(self, conn: sqlite3.Connection) -> list[dict[str, Any]]:
         sess = self.store.session(conn)
         rows = conn.execute(
@@ -94,14 +108,42 @@ class ProfileService:
             (sess["sessionId"],)).fetchall()
         out = []
         for r in rows:
+            pref_id = r["id"]
             ev = conn.execute(
-                "SELECT kind, game, setting_id, detail, created_at FROM evidence WHERE dimension = ? ORDER BY created_at DESC LIMIT 6",
-                (r["dimension"],)).fetchall()
+                "SELECT kind, game, setting_id, detail, created_at, preference_id FROM evidence "
+                "WHERE preference_id = ? ORDER BY created_at DESC LIMIT 6",
+                (pref_id,),
+            ).fetchall()
+            if not ev and r["source"] == "seed":
+                # Seeded scenario preferences may reference matching scenario evidence rows without preference_id
+                ev = conn.execute(
+                    "SELECT kind, game, setting_id, detail, created_at, preference_id FROM evidence "
+                    "WHERE preference_id IS NULL AND dimension = ? ORDER BY created_at DESC LIMIT 4",
+                    (r["dimension"],),
+                ).fetchall()
+            ev_list = [
+                {
+                    "kind": e["kind"],
+                    "game": e["game"],
+                    "setting_id": e["setting_id"],
+                    "detail": e["detail"],
+                    "created_at": e["created_at"],
+                    "sourceCategory": self._source_category(e["kind"], e["detail"]),
+                }
+                for e in ev
+            ]
             out.append({
-                "id": r["id"], "dimension": r["dimension"], "dimensionLabel": DIMENSION_LABELS.get(r["dimension"], r["dimension"]),
-                "direction": r["direction"], "scope": r["scope"], "game": r["game"], "originGame": r["origin_game"],
-                "source": r["source"], "note": r["note"], "createdAt": r["created_at"],
-                "evidence": [dict(e) for e in ev],
+                "id": pref_id,
+                "dimension": r["dimension"],
+                "dimensionLabel": DIMENSION_LABELS.get(r["dimension"], r["dimension"]),
+                "direction": r["direction"],
+                "scope": r["scope"],
+                "game": r["game"],
+                "originGame": r["origin_game"],
+                "source": r["source"],
+                "note": r["note"],
+                "createdAt": r["created_at"],
+                "evidence": ev_list,
             })
         return out
 
@@ -113,30 +155,63 @@ class ProfileService:
             raise Invalid("direction must be 'prioritize' or 'deprioritize'")
         if scope not in ("durable", "session"):
             raise Invalid("scope must be 'durable' or 'session'")
-        if source not in ("user_explicit", "chat_confirmed", "seed"):
+        if source not in ("user_explicit", "chat_confirmed", "chat_explicit", "seed"):
             raise Invalid("Preferences can only be created by an explicit user action.")
         conn = self.store.connect()
         try:
             with write_tx(conn):
-                sess = self.store.session(conn)
-                # One active preference per (dimension, scope): a new statement replaces the old one.
-                conn.execute(
-                    "UPDATE preferences SET active = 0, updated_at = ? WHERE dimension = ? AND scope = ? AND active = 1 "
-                    "AND (scope = 'durable' OR session_id = ?)", (now_iso(), dimension, scope, sess["sessionId"]))
-                pid = new_id("pref")
-                ts = now_iso()
-                conn.execute(
-                    "INSERT INTO preferences(id, dimension, direction, scope, session_id, game, origin_game, source, note, active, created_at, updated_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,1,?,?)",
-                    (pid, dimension, direction, scope, sess["sessionId"] if scope == "session" else None, game,
-                     origin_game or game, source, note, ts, ts))
-                self.add_evidence(conn, kind="preference_set", dimension=dimension, game=game,
-                                  detail=f"{'Prioritize' if direction == 'prioritize' else 'De-prioritize'} "
-                                         f"{DIMENSION_LABELS[dimension]} ({'lasting' if scope == 'durable' else 'this session only'})"
-                                         + (f": {note}" if note else ""))
+                pid = self.add_preference_tx(
+                    conn,
+                    dimension=dimension,
+                    direction=direction,
+                    scope=scope,
+                    source=source,
+                    game=game,
+                    origin_game=origin_game,
+                    note=note,
+                )
             return {"id": pid}
         finally:
             conn.close()
+
+    def add_preference_tx(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        dimension: str,
+        direction: str,
+        scope: str,
+        source: str,
+        game: Optional[str],
+        origin_game: Optional[str],
+        note: Optional[str],
+    ) -> str:
+        """Persist a confirmed preference inside an active write transaction."""
+        sess = self.store.session(conn)
+        conn.execute(
+            "UPDATE preferences SET active = 0, updated_at = ? WHERE dimension = ? AND scope = ? AND active = 1 "
+            "AND (scope = 'durable' OR session_id = ?)",
+            (now_iso(), dimension, scope, sess["sessionId"]),
+        )
+        pid = new_id("pref")
+        ts = now_iso()
+        conn.execute(
+            "INSERT INTO preferences(id, dimension, direction, scope, session_id, game, origin_game, source, note, active, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,1,?,?)",
+            (pid, dimension, direction, scope, sess["sessionId"] if scope == "session" else None, game,
+             origin_game or game, source, note, ts, ts),
+        )
+        self.add_evidence(
+            conn,
+            kind="preference_set",
+            dimension=dimension,
+            game=game,
+            preference_id=pid,
+            detail=f"{'Prioritize' if direction == 'prioritize' else 'De-prioritize'} "
+                   f"{DIMENSION_LABELS[dimension]} ({'lasting' if scope == 'durable' else 'this session only'})"
+                   + (f": {note}" if note else ""),
+        )
+        return pid
 
     def remove_preference(self, pref_id: str) -> None:
         conn = self.store.connect()
@@ -147,17 +222,34 @@ class ProfileService:
                     raise NotFound("Unknown preference")
                 conn.execute("UPDATE preferences SET active = 0, updated_at = ? WHERE id = ?", (now_iso(), pref_id))
                 self.add_evidence(conn, kind="preference_removed", dimension=row["dimension"], game=row["game"],
+                                  preference_id=pref_id,
                                   detail=f"Removed preference for {DIMENSION_LABELS.get(row['dimension'], row['dimension'])}")
         finally:
             conn.close()
 
     def add_evidence(self, conn: sqlite3.Connection, *, kind: str, dimension: Optional[str] = None,
                      game: Optional[str] = None, setting_id: Optional[str] = None, proposal_id: Optional[str] = None,
-                     detail: Optional[str] = None) -> None:
+                     preference_id: Optional[str] = None, detail: Optional[str] = None) -> None:
         sess = self.store.session(conn)
         conn.execute(
-            "INSERT INTO evidence(id, kind, dimension, game, setting_id, proposal_id, detail, session_id, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-            (new_id("ev"), kind, dimension, game, setting_id, proposal_id, detail, sess["sessionId"], now_iso()))
+            "INSERT INTO evidence(id, kind, dimension, game, setting_id, proposal_id, preference_id, detail, session_id, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (new_id("ev"), kind, dimension, game, setting_id, proposal_id, preference_id, detail, sess["sessionId"], now_iso()))
+
+    def snapshot_context(self, conn: sqlite3.Connection, game: str) -> dict[str, Any]:
+        """Lightweight snapshot of active goals/priorities used to detect semantically stale proposals later."""
+        goals = self.session_goals(conn, game)
+        prefs = self.preferences(conn)
+        ctx = self.active_context(conn, game)
+        return {
+            "goalText": goals[0]["text"] if goals else None,
+            "goalDimensions": list(goals[0]["dimensions"]) if goals else [],
+            "preferences": [
+                {"id": p["id"], "dimension": p["dimension"], "direction": p["direction"], "scope": p["scope"]}
+                for p in prefs
+            ],
+            "contextEventType": ctx["eventType"] if ctx else None,
+        }
 
     def evidence(self, conn: sqlite3.Connection, limit: int = 50) -> list[dict[str, Any]]:
         rows = conn.execute("SELECT * FROM evidence ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
@@ -270,6 +362,42 @@ class ProfileService:
             for r in rows
         ]
 
+    def add_personal_fact_tx(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        fact_key: str,
+        value_text: str,
+        origin_game: Optional[str],
+        source_setting_id: Optional[str],
+        source: str,
+        note: Optional[str] = None,
+    ) -> str:
+        spec = PERSONAL_FACT_TYPES[fact_key]
+        clean_val = (value_text or "").strip()
+        ts = now_iso()
+        conn.execute(
+            "UPDATE personal_setup_facts SET active = 0, updated_at = ? "
+            "WHERE fact_key = ? AND COALESCE(origin_game, '') = ? AND active = 1",
+            (ts, fact_key, origin_game or ""),
+        )
+        fid = new_id("fact")
+        conn.execute(
+            "INSERT INTO personal_setup_facts(id, fact_key, label, value_text, origin_game, "
+            "source_setting_id, source, note, active, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,1,?,?)",
+            (fid, fact_key, spec["label"], clean_val, origin_game, source_setting_id, source, note, ts, ts),
+        )
+        self.add_evidence(
+            conn,
+            kind="personal_fact_set",
+            game=origin_game,
+            setting_id=source_setting_id,
+            detail=f"Confirmed {spec['label']}: {clean_val}"
+            + (f" ({game_name(origin_game)})" if origin_game else ""),
+        )
+        return fid
+
     def add_personal_fact(
         self,
         *,
@@ -282,35 +410,22 @@ class ProfileService:
     ) -> dict[str, Any]:
         if fact_key not in PERSONAL_FACT_TYPES:
             raise Invalid(f"Unknown personal setup preference type '{fact_key}'")
-        if source not in ("user_explicit", "chat_confirmed", "seed"):
+        if source not in ("user_explicit", "chat_confirmed", "chat_explicit", "seed"):
             raise Invalid("Personal setup facts require explicit user confirmation.")
         clean_val = (value_text or "").strip()
         if not clean_val or len(clean_val) > 120:
             raise Invalid("Value must be 1 to 120 characters.")
-        spec = PERSONAL_FACT_TYPES[fact_key]
         conn = self.store.connect()
         try:
             with write_tx(conn):
-                ts = now_iso()
-                conn.execute(
-                    "UPDATE personal_setup_facts SET active = 0, updated_at = ? "
-                    "WHERE fact_key = ? AND COALESCE(origin_game, '') = ? AND active = 1",
-                    (ts, fact_key, origin_game or ""),
-                )
-                fid = new_id("fact")
-                conn.execute(
-                    "INSERT INTO personal_setup_facts(id, fact_key, label, value_text, origin_game, "
-                    "source_setting_id, source, note, active, created_at, updated_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,1,?,?)",
-                    (fid, fact_key, spec["label"], clean_val, origin_game, source_setting_id, source, note, ts, ts),
-                )
-                self.add_evidence(
+                fid = self.add_personal_fact_tx(
                     conn,
-                    kind="personal_fact_set",
-                    game=origin_game,
-                    setting_id=source_setting_id,
-                    detail=f"Confirmed {spec['label']}: {clean_val}"
-                    + (f" ({game_name(origin_game)})" if origin_game else ""),
+                    fact_key=fact_key,
+                    value_text=clean_val,
+                    origin_game=origin_game,
+                    source_setting_id=source_setting_id,
+                    source=source,
+                    note=note,
                 )
             return {"id": fid}
         finally:

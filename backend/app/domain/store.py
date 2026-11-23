@@ -383,6 +383,7 @@ class Store:
 
         prop_row = None
         run_row = None
+        user_msg_text: Optional[str] = None
         items_by_setting: dict[str, sqlite3.Row] = {}
         if b["proposal_id"]:
             prop_row = conn.execute("SELECT * FROM proposals WHERE id = ?", (b["proposal_id"],)).fetchone()
@@ -392,6 +393,12 @@ class Store:
                         "SELECT id, mode, model, goal_excerpt FROM agent_runs WHERE id = ?",
                         (prop_row["run_id"],),
                     ).fetchone()
+                    um = conn.execute(
+                        "SELECT content_json FROM chat_messages WHERE run_id = ? AND role = 'user' LIMIT 1",
+                        (prop_row["run_id"],),
+                    ).fetchone()
+                    if um:
+                        user_msg_text = (loads(um["content_json"], {}) or {}).get("text")
                 for pit in conn.execute(
                     "SELECT * FROM proposal_items WHERE proposal_id = ? ORDER BY position",
                     (b["proposal_id"],),
@@ -432,16 +439,44 @@ class Store:
 
         prop_keys = set(prop_row.keys()) if prop_row is not None else set()
         plan_obj = loads(prop_row["plan_json"], None) if (prop_row is not None and "plan_json" in prop_keys) else None
+        ctx_snap = loads(prop_row["context_snapshot_json"], None) if (prop_row is not None and "context_snapshot_json" in prop_keys) else None
+        raw_excerpt = run_row["goal_excerpt"] if run_row else None
+        verbatim_req = user_msg_text or None
+        is_excerpt = bool(verbatim_req is None and raw_excerpt is not None and len(raw_excerpt) >= 118)
+
+        # Check whether an active session goal conflicts with this historical batch's recorded dimensions
+        outdated_for_goal = False
+        if prop_row is not None:
+            hist_dims = set((ctx_snap or {}).get("goalDimensions") or [])
+            if not hist_dims:
+                for ev in events:
+                    pit = items_by_setting.get(ev["settingId"])
+                    if pit:
+                        hist_dims.update(loads(pit["dimensions_json"], []))
+            if hist_dims:
+                sess = self.session(conn)
+                cur_goals = conn.execute(
+                    "SELECT dimensions_json FROM session_goals WHERE active = 1 AND session_id = ? AND game = ? ORDER BY created_at DESC LIMIT 1",
+                    (sess["sessionId"], game),
+                ).fetchone()
+                if cur_goals:
+                    from .profile import CONFLICT_PAIRS
+
+                    cur_dims = set(loads(cur_goals["dimensions_json"], []))
+                    if any(set(CONFLICT_PAIRS.get(cd, ())) & hist_dims for cd in cur_dims):
+                        outdated_for_goal = True
+
         provenance = {
             "hasRecordedRationale": bool(
                 prop_row is not None
                 and (
-                    (run_row is not None and bool(run_row["goal_excerpt"]))
+                    (run_row is not None and bool(raw_excerpt))
                     or any(ev.get("why") or ev.get("basedOn") for ev in events)
                     or ("restaged_from_batch_id" in prop_keys and bool(prop_row["restaged_from_batch_id"]))
                 )
             ),
-            "userRequest": run_row["goal_excerpt"] if run_row else None,
+            "userRequest": verbatim_req or raw_excerpt,
+            "userRequestIsExcerpt": is_excerpt,
             "runId": prop_row["run_id"] if prop_row else None,
             "model": run_row["model"] if (run_row and run_row["mode"] == "ai") else None,
             "proposalTitle": prop_row["title"] if prop_row else None,
@@ -462,6 +497,7 @@ class Store:
             "undoable": undoable,
             "superseded": bool(not b["undone_by_batch_id"] and superseded_count > 0),
             "supersededCount": superseded_count,
+            "outdatedForCurrentGoal": outdated_for_goal,
             "provenance": provenance,
             "events": events,
             "gameRevision": self.game_revision(conn, game),

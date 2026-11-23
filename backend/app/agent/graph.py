@@ -21,11 +21,18 @@ from typing import Any, Callable, Optional, TypedDict
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 
-from ..domain.cross_game import compare_cross_game
+from ..domain.cross_game import compare_cross_game, parse_cross_game_direction
 from ..domain.planner import build_coverage_audit
 from ..domain.profile import ProfileService
 from ..domain.store import Store
-from .intent import detect_dimensions, extract_sensitivity_number, is_cross_game_query
+from .intent import (
+    detect_dimensions,
+    detect_explicit_memory,
+    extract_sensitivity_number,
+    is_cross_game_query,
+    is_goal_statement,
+    is_speculative,
+)
 from .prompts import (
     compose_batch_messages,
     compose_messages,
@@ -188,6 +195,7 @@ def build_turn_graph(
 
         cross_game_data = None
         if is_cross_game_query(state["message"]):
+            src_g, tgt_g, _ = parse_cross_game_direction(state["message"], state["game"])
             conn_cg = store.connect()
             try:
                 cross_game_data = compare_cross_game(
@@ -197,6 +205,8 @@ def build_turn_graph(
                     query=state["message"],
                     current_game=state["game"],
                     source_sensitivity=extract_sensitivity_number(state["message"]),
+                    source_game=src_g,
+                    target_game=tgt_g,
                 )
             finally:
                 conn_cg.close()
@@ -486,12 +496,25 @@ def build_turn_graph(
                 source="ai",
                 max_recommendations=scope_plan.max_recs,
                 scope_plan=scope_plan,
+                message=state["message"],
             )
             if draft is not None
             else None
         )
         feedback = needs_repair(draft, validated, state["message"], scope_plan=scope_plan, audit=audit)
         if validated is not None:
+            if not is_speculative(state["message"]):
+                det_mem = detect_explicit_memory(state["message"], state["game"])
+                existing_keys = {
+                    (m.get("kind"), m.get("dimension") or m.get("factKey"), m.get("game"))
+                    for m in validated.get("explicitMemoryActions", [])
+                }
+                for dm in det_mem:
+                    k = (dm.get("kind"), dm.get("dimension") or dm.get("factKey"), dm.get("game"))
+                    if k not in existing_keys:
+                        validated.setdefault("explicitMemoryActions", []).append(dm)
+                if not validated.get("goalChanged") and validated.get("goalDimensions") and is_goal_statement(state["message"], validated["goalDimensions"]):
+                    validated["goalChanged"] = True
             partial = bool(state.get("batch_partial", False))
             completed = int(state.get("batches_completed", 1))
             total = int(state.get("batches_total", 1))
@@ -521,6 +544,7 @@ def build_turn_graph(
                     "eligibleCount": audit["eligibleCount"],
                     "proposedCount": len(validated["recommendations"]),
                     "alreadyAlignedCount": audit["alreadyAlignedCount"],
+                    "tradeoffRetainedCount": audit.get("tradeoffRetainedCount", 0),
                     "alreadyStagedCount": audit["alreadyStagedCount"],
                     "lockedCount": audit["lockedCount"],
                     "unavailableCount": audit["unavailableCount"],
@@ -528,6 +552,7 @@ def build_turn_graph(
                     "byCategory": audit["byCategory"],
                 },
                 "alreadyAlignedItems": audit.get("alreadyAlignedItems", []),
+                "tradeoffRetainedItems": audit.get("tradeoffRetainedItems", []),
                 "lockedItems": audit.get("lockedItems", []),
                 "unavailableItems": audit.get("unavailableItems", []),
                 "manualConsiderations": audit["manualConsiderations"][:10],
