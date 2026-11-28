@@ -53,3 +53,12 @@ def test_cross_game_onboarding_does_not_treat_undo_as_a_new_choice(services):
     discover = services.relevant_now.ensure_first_visit("cs2")
     assert not any(card["crossGame"] and card["settingId"] == "cs2.kbmouse.mouse_sensitivity"
                    for card in discover["items"])
+
+
+def test_crosshair_narrative_is_a_confirmable_fact_without_numeric_transfer(services):
+    result = validate_draft(
+        services.store, "valorant", AssistantDraft(intent="preference", reply="Crosshair style."),
+        source="rules", message="Remember that I prefer a small green crosshair.",
+    )
+    assert [(a["factKey"], a["valueText"]) for a in result["explicitMemoryActions"]] == [("crosshair_style", "small green")]
+    assert result["recommendations"] == []

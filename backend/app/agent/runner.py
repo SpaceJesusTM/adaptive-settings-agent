@@ -16,7 +16,7 @@ from ollama import ResponseError
 
 from .exact import exact_draft
 from .explain import comparison_draft
-from .objective import interpret_objective, preference_removal
+from .objective import interpret_objective, preference_removal, protected_setting_ids
 from .schemas import AssistantDraft
 from .scope import ScopePlan
 from ..catalog.schema import DIMENSION_LABELS
@@ -256,6 +256,9 @@ class AgentRunner:
                 direct_draft = AssistantDraft(intent="preference", reply="I checked System Understanding for that preference.")
             else:
                 direct_draft = exact_draft(self.store, game, message) or comparison_draft(self.store, game, message)
+                if direct_draft is None and protected_setting_ids(self.store, game, message) and not objective.explicit:
+                    if not objective.explanation:
+                        direct_draft = AssistantDraft(intent="other", reply="I'll keep those settings unchanged for this objective.")
             if direct_draft is not None:
                 handle.step("Checking the requested settings")
                 scope = ScopePlan(
@@ -480,6 +483,17 @@ class AgentRunner:
                         if goal_id:
                             result["sessionGoalId"] = goal_id
                             sync_trigger = "goal_change"
+                    elif new_protections := protected_setting_ids(self.store, handle.game, msg_text):
+                        current = self.profile.session_goals(conn, handle.game)
+                        if current:
+                            goal = current[0]
+                            goal_id = self.profile.set_session_goal(
+                                conn, handle.game, goal["text"], goal["dimensions"], goal["source"],
+                                new_protections | set(goal["protectedSettingIds"]),
+                            )
+                            if goal_id:
+                                result["sessionGoalId"] = goal_id
+                                sync_trigger = "goal_change"
 
                     applied_updates: list[dict[str, Any]] = []
                     if msg_text and not speculative:
@@ -515,7 +529,7 @@ class AgentRunner:
                             elif mem.get("kind") == "fact" and mem.get("factKey") in PERSONAL_FACT_TYPES and mem.get("valueText"):
                                 fk = mem["factKey"]
                                 target_g = mem.get("game") or handle.game
-                                src_sid = FACT_SETTING_MAP.get(fk, {}).get(target_g)
+                                src_sid = FACT_SETTING_MAP.get(fk, {}).get(target_g) if fk != "crosshair_style" else None
                                 fid = self.profile.add_personal_fact_tx(
                                     conn,
                                     fact_key=fk,

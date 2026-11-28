@@ -142,7 +142,7 @@ def detect_fact_discrepancies(store, profile, conn: sqlite3.Connection) -> list[
     for f in facts:
         fk = f["factKey"]
         origin_game = f.get("originGame")
-        if not origin_game or fk not in FACT_SETTING_MAP:
+        if not origin_game or fk not in FACT_SETTING_MAP or (fk == "crosshair_style" and not f["sourceSettingId"]):
             continue
         sid = FACT_SETTING_MAP[fk].get(origin_game)
         if not sid:

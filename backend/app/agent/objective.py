@@ -27,6 +27,7 @@ _TEMPORARY_END = re.compile(
 _PROTECT = re.compile(
     r"\b(?:keep|leave|preserve)\s+(?P<keep>[^.!?;]{1,155}?)\s+"
     r"(?:unchanged|as (?:it|they) (?:is|are)|exactly as (?:it|they) (?:is|are)|the same|alone)\b"
+    r"|\b(?:i (?:want|need) to keep|keep) (?P<shadows>(?:my |the )?(?:global |dynamic )?shadows)\s+because\b"
     r"|\b(?:don['’]t|do not|never)\s+(?:change|touch|adjust|modify)\s+(?P<avoid>[^.!?;]{1,110})"
     r"|\b(?P<only>(?:only\s+(?:change|adjust|configure|touch)|configure)\s+(?:the\s+)?"
     r"(?:graphics|video)(?: and frame[- ]pacing)?(?:\s+settings)?)\b",
@@ -73,7 +74,7 @@ def protected_setting_ids(store, game: str, message: str) -> set[str]:
         if match["only"]:
             protected.update(s.id for s in settings if s.tabId != "video" or s.controlType == "preset")
             continue
-        terms = _END_PROTECTION.split(match["keep"] or match["avoid"], maxsplit=1)[0].lower()
+        terms = _END_PROTECTION.split(match["keep"] or match["avoid"] or match["shadows"], maxsplit=1)[0].lower()
         for s in settings:
             label = s.exactLabel.lower()
             if (
@@ -81,7 +82,9 @@ def protected_setting_ids(store, game: str, message: str) -> set[str]:
                 or ("resolution" in terms and "resolution" in label)
                 or ("aspect ratio" in terms and "aspect ratio" in label)
                 or ("sensitivity" in terms and "sensitivity" in label)
-                or (re.fullmatch(r"(?:my |the )?shadows", terms.strip()) and "shadow" in label)
+                or (re.fullmatch(r"(?:my |the )?(?:global |dynamic )?shadows", terms.strip())
+                    and "shadow" in label and ("global" not in terms or "global" in label)
+                    and ("dynamic" not in terms or "dynamic" in label))
                 or ("crosshair" in terms and (s.tabId == "crosshair" or ".crosshair." in s.id))
                 or (re.search(r"\baudio\b|\bsound settings\b", terms) and s.tabId == "audio")
                 or (re.search(r"\b(?:controls|keybinds|key bindings)\b", terms)
@@ -130,7 +133,19 @@ def explicit_memory_clauses(message: str, game: str) -> list[dict]:
         named_scope = re.findall(r"\b(?:in|for)\s+(valorant|cs2)\b", clause, re.I)
         if len(set(name.lower() for name in named_scope)) > 1:
             continue
-        for action in detect_explicit_memory(clause, game):
+        extracted = detect_explicit_memory(clause, game)
+        style = re.fullmatch(
+            r"(?:please )?remember(?: that)? i (?:prefer|use|like) (?:a |my )?"
+            r"([a-z]+(?: [a-z]+){0,4}) crosshair(?: (?:in|for) (?:valorant|cs2))?",
+            clause.strip(), re.I,
+        )
+        style_words = {"small", "large", "green", "red", "white", "cyan", "pink", "yellow", "blue",
+                       "static", "dynamic", "black", "purple", "thin", "thick", "outlined", "dot"}
+        if style and set(style[1].lower().split()) <= style_words:
+            extracted = [{"kind": "fact", "factKey": "crosshair_style", "valueText": style[1].lower(),
+                          "scope": "durable", "game": named_scope[0].lower() if named_scope else game,
+                          "quote": clause[:180]}]
+        for action in extracted:
             if action["kind"] == "fact" and _CURRENT.search(clause):
                 continue
             if action["kind"] == "preference":
