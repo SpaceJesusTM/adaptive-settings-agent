@@ -3808,6 +3808,14 @@
                       ],
                       "why": "Riot lists UI Quality among the most useful settings to adjust for performance.",
                       "basis": "official"
+                    },
+                    {
+                      "dimension": "visual_quality",
+                      "prefer": [
+                        "high"
+                      ],
+                      "why": "Higher UI Quality keeps interface rendering crisp. Lower it if the rendering cost matters more for your setup.",
+                      "basis": "editorial"
                     }
                   ]
                 },
@@ -3980,7 +3988,7 @@
                   "verificationNotes": "Riot confirms the label and the 1x value; the 2x-16x steps are corroborated by a third-party guide.",
                   "description": "Keeps textures sharp when viewed at steep angles.",
                   "descriptionSource": "editorial",
-                  "tradeoffs": "Lower filtering makes distant floors and walls blurrier.",
+                  "tradeoffs": "Lower filtering makes distant floors and walls blurrier. Higher filtering can cost GPU time, depending on the scene and hardware.",
                   "hints": [
                     {
                       "dimension": "performance",
@@ -3991,6 +3999,15 @@
                       ],
                       "why": "Riot's troubleshooting guide uses 1x as the lowest-cost setting; stepping down reduces texture filtering work.",
                       "basis": "official"
+                    },
+                    {
+                      "dimension": "visual_quality",
+                      "prefer": [
+                        "16x",
+                        "8x"
+                      ],
+                      "why": "Higher anisotropic filtering keeps floor and wall textures sharper at shallow angles. Compare the visual benefit and GPU cost on your hardware.",
+                      "basis": "editorial"
                     }
                   ]
                 },
@@ -4141,6 +4158,14 @@
                       ],
                       "why": "Riot lists Cast Shadows among visual effects to try disabling for performance.",
                       "basis": "official"
+                    },
+                    {
+                      "dimension": "visual_quality",
+                      "prefer": [
+                        "on"
+                      ],
+                      "why": "Enable Cast Shadows when you want the depth cues from dynamic shadows and can accept the extra rendering work.",
+                      "basis": "editorial"
                     }
                   ]
                 },
