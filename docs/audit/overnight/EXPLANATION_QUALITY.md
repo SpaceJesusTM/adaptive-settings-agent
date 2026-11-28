@@ -1,0 +1,17 @@
+# Explanation quality and canonical navigation
+
+The first-audit model explained the topic of Ambient Occlusion in the repeated live fixture, but omitted its canonical link in two runs. The current [validator](../../../backend/app/agent/validate.py) binds a whole, unambiguous catalogue label from the explanation clause. It exposes the setting path, catalogue description and trade-off alongside the text. If the model provides useful prose without a structured explanation, the backend fills the missing item with the catalogue's description and trade-off. A phrase such as “this setting” can bind to an explicitly focused control. An unresolved reference supplies no navigation target.
+
+The [comparison route](../../../backend/app/agent/explain.py) uses a short grounded distinction when the player explicitly names a recognizable pair. It can explain what a setting does, its practical effect and when the trade-off matters. A quick recommendation still carries the main consequence in the item rationale. Follow-ups over an unfamiliar comparison use the existing model or catalogue path. The deterministic route needs no further interaction or model call.
+
+| Player need | Grounded explanation test | Canonical behavior |
+| --- | --- | --- |
+| Confuses dark creases with shadows cast by players | Ambient Occlusion adds shading at contacts and corners. Dynamic Shadows determines which light sources produce moving shadows. More player shadows can reveal a moving opponent, while contact shading adds depth and GPU work. | Links Ambient Occlusion and Dynamic Shadows, without a proposed adjustment. |
+| Confuses global shadow quality with where player shadows appear | Global Shadow Quality changes how shadows look. Dynamic Shadows changes which light sources cast moving shadows. Sun Only can remove an indoor clue. | Links both CS2 controls. |
+| Wants sharper details in VALORANT | Texture Quality changes stored surface detail. Anisotropic Filtering keeps that detail legible where the viewing angle is shallow. | Links the two Graphics Quality rows. |
+| Equates FPS with refresh rate | FPS counts frames the game produces. Hz counts potential display updates. Neither supplies an observed frame-rate reading. | Leaves this conceptual question in chat. |
+| Asks if Ambient Occlusion was applied or is still pending | Reads the committed value and the review tray separately. | Links to the control and changes no setting or preference. |
+
+Buçinca et al. found that an anticipated comparison can improve immediate independent decisions in their task. Here, the alternative comes from the user's stated confusion or a pair supported by the catalogue. The constant prose and ordered pair allow an independent review for function, contrast, scope, consequence and reachability. The frozen local scores establish the navigation fix. The broader contrastive scenario also checks what the prose teaches and whether the menus remain untouched. Human retention, transfer or reduced dependence has yet to be measured. [Contrastive explanations study](https://kgajos.seas.harvard.edu/papers/bucinca2025contrastive.pdf)
+
+An earlier turn may mention a pending draft while valid model prose focuses on it. The [authority checks](../../../backend/tests/test_overnight.py) strip unsupported player-action assertions from the reply and read evidence from committed change history. The rule is deliberately limited. It cannot reliably assess every paraphrase of prior action or quantify FPS and input delay on real hardware.
