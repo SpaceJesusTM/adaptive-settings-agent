@@ -490,6 +490,7 @@ def build_turn_graph(
                 max_recommendations=scope_plan.max_recs,
                 scope_plan=scope_plan,
                 message=state["message"],
+                focused_setting_id=(state.get("ui_state") or {}).get("focusedSettingId"),
             )
             if draft is not None
             else None

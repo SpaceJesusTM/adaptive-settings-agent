@@ -41,6 +41,9 @@ class ProposalService:
         values = self.store.values(conn, game)
         flat = {k: v["value"] for k, v in values.items()}
         hw = self.store.hardware(conn)
+        current_goals = self.profile.session_goals(conn, game)
+        cur_goal = current_goals[0] if current_goals else None
+        protections = set((cur_goal or {}).get("protectedSettingIds") or ())
         items = []
         for r in conn.execute("SELECT * FROM proposal_items WHERE proposal_id = ? ORDER BY position", (proposal_id,)):
             s = self.store.registry.setting(game, r["setting_id"])
@@ -65,6 +68,8 @@ class ProposalService:
                 "currentValue": cur["value"], "currentDisplay": display_value(s, cur["value"]),
                 "currentRevision": cur["revision"], "stale": stale,
                 "locked": self.store.is_locked(conn, game, s.id),
+                "protectedReason": ("Your current goal keeps this setting unchanged."
+                                    if r["status"] == "pending" and s.id in protections else None),
                 "unavailableReason": availability_problem(self.store.registry, s, {**flat, s.id: effective}, hw),
                 "status": r["status"], "statusReason": r["status_reason"],
                 "why": r["why"], "tradeoff": r["tradeoff"], "whatItDoes": s.description,
@@ -78,20 +83,14 @@ class ProposalService:
         freshness_status = "consistent"
         freshness_warning: Optional[str] = None
         if p["status"] == "pending":
-            cur_goals = self.profile.session_goals(conn, game)
-            cur_goal = cur_goals[0] if cur_goals else None
             snap_goal_dims = list((ctx_snap or {}).get("goalDimensions") or (plan_obj or {}).get("inferredDimensions") or [])
             snap_goal_text = (ctx_snap or {}).get("goalText")
             item_dims = list(dict.fromkeys(d for it in items if it["status"] == "pending" for d in it.get("dimensions", [])))
             compare_dims = snap_goal_dims or item_dims
 
-            protected_items = {it["settingId"] for it in items if it["status"] == "pending"} & set(
-                (cur_goal or {}).get("protectedSettingIds") or ()
-            )
-            proposal_is_exact = p["source"] == "rules" and (plan_obj or {}).get("scope") == "focused"
-            if protected_items and not proposal_is_exact:
+            if any(it["protectedReason"] for it in items):
                 freshness_status = "outdated_goal"
-                freshness_warning = "This draft includes settings your current goal asks to keep unchanged. Review those items before applying."
+                freshness_warning = "Settings protected by your current goal are excluded from Apply."
             elif p["source"] == "history" and (item_dims or (plan_obj or {}).get("inferredDimensions")) and cur_goal:
                 hist_dims = item_dims or list((plan_obj or {}).get("inferredDimensions") or [])
                 cur_dims = set(cur_goal.get("dimensions") or [])
@@ -548,6 +547,14 @@ class ProposalService:
                         if r["status"] != "pending":
                             raise Conflict(f"Item {iid} is not pending.", code="not_pending")
                         selected.append(r)
+                    protections = self.profile.objective_protections(conn, p["game"])
+                    protected = [r["setting_id"] for r in selected if r["setting_id"] in protections]
+                    if protected:
+                        raise Conflict(
+                            "Your current goal protects one or more selected settings. Deselect them to apply the other changes.",
+                            code="protected_by_objective",
+                            details={"settingIds": protected},
+                        )
                     changes = [Change(r["setting_id"],
                                       loads(r["edited_value_json"]) if r["edited_value_json"] is not None else loads(r["proposed_value_json"]),
                                       expected_revision=int(r["baseline_revision"])) for r in selected]

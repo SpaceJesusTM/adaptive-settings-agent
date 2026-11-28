@@ -27,14 +27,14 @@ function ItemRow({
   const requestFocus = useAppStore((s) => s.requestFocusInMainWindow);
   const [showDetails, setShowDetails] = useState(false);
 
-  const blocked = item.locked || Boolean(item.unavailableReason);
+  const blocked = item.locked || Boolean(item.unavailableReason || item.protectedReason);
   const labelId = `tray-${item.id}`;
   return (
     <li className={`tray-item ${item.stale ? "is-stale" : ""} ${blocked ? "is-blocked" : ""}`}>
       <label className="tray-check">
         <input
           type="checkbox"
-          checked={selected}
+          checked={selected && !blocked && !item.stale}
           disabled={blocked || item.stale}
           onChange={(e) => onSelect(e.target.checked)}
           aria-label={`Include ${item.label} in the change set`}
@@ -88,6 +88,7 @@ function ItemRow({
             </button>
           </p>
         ) : null}
+        {item.protectedReason ? <p className="tray-warn" role="alert">{item.protectedReason}</p> : null}
         {item.unavailableReason ? (
           <p className="tray-warn" role="alert">
             {item.unavailableReason}
@@ -150,12 +151,12 @@ function ProposalBlock({ proposal }: { proposal: Proposal }) {
   useEffect(() => {
     setSelected((prev) => {
       const next: Record<string, boolean> = {};
-      for (const i of pending) next[i.id] = prev[i.id] ?? !(i.locked || i.unavailableReason || i.stale);
+      for (const i of pending) next[i.id] = prev[i.id] ?? !(i.locked || i.unavailableReason || i.protectedReason || i.stale);
       return next;
     });
   }, [pending]);
 
-  const selectable = pending.filter((i) => !(i.locked || i.unavailableReason || i.stale));
+  const selectable = pending.filter((i) => !(i.locked || i.unavailableReason || i.protectedReason || i.stale));
   const chosen = selectable.filter((i) => selected[i.id]).map((i) => i.id);
   const cs2Clash = pending.filter((i) => chosen.includes(i.id) && pendingVideo[i.settingId] !== undefined);
 
@@ -331,7 +332,7 @@ function ProposalBlock({ proposal }: { proposal: Proposal }) {
 
       <div className="tray-sections">
         {sections.map((sec) => {
-          const secSelectable = sec.items.filter((i) => !(i.locked || i.unavailableReason || i.stale));
+          const secSelectable = sec.items.filter((i) => !(i.locked || i.unavailableReason || i.protectedReason || i.stale));
           const allSelected = secSelectable.length > 0 && secSelectable.every((i) => selected[i.id]);
           return (
             <div key={sec.category} className="tray-section-group">

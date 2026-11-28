@@ -247,6 +247,7 @@ export interface ProposalItem {
   currentRevision: number;
   stale: boolean;
   locked: boolean;
+  protectedReason?: string | null;
   unavailableReason: string | null;
   status: "pending" | "applied" | "rejected" | "blocked";
   statusReason: string | null;

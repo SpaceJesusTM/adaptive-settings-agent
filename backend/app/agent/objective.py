@@ -146,6 +146,19 @@ def explicit_memory_clauses(message: str, game: str) -> list[dict]:
             extracted = [{"kind": "fact", "factKey": "crosshair_style", "valueText": style[1].lower(),
                           "scope": "durable", "game": named_scope[0].lower() if named_scope else game,
                           "quote": clause[:180]}]
+        statement = re.sub(r"^(?:please )?(?:remember(?: that)?|from now on)\s+", "", clause.strip(), flags=re.I)
+        voice = re.fullmatch(
+            r"i\s+(?:always\s+)?(?:use|prefer|keep)\s+"
+            r"(push[ -]to[ -]talk|push[ -]to[ -]use mic|voice activation|open mic(?:rophone)?|automatic voice)"
+            r"(?:\s+(?:in|for)\s+(valorant|cs2))?", statement, re.I,
+        )
+        if voice and not _CURRENT.search(clause):
+            named_game = voice[2].lower() if voice[2] else game
+            mode = "Push To Talk" if voice[1].lower().startswith("push") else (
+                "Automatic" if named_game == "valorant" else "Open Microphone"
+            )
+            extracted = [{"kind": "fact", "factKey": "voice_activation", "valueText": mode,
+                          "scope": "durable", "game": named_game, "quote": clause[:180]}]
         for action in extracted:
             if action["kind"] == "fact" and _CURRENT.search(clause):
                 continue

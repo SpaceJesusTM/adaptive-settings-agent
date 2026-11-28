@@ -272,7 +272,7 @@ class AgentRunner:
                 )
                 validated = validate_draft(self.store, game, direct_draft, source="rules",
                                            max_recommendations=scope.max_recs, scope_plan=scope, message=message,
-                                           inherit_objective=False)
+                                           inherit_objective=True)
                 # Exact setting commands and history recovery do not establish an optimization objective.
                 validated.update(goalDimensions=[], goalChanged=False, plan={**scope.to_meta(), "autoStage": scope.auto_stage})
                 self._finish(handle, status=status, result=validated,
@@ -362,6 +362,7 @@ class AgentRunner:
                     max_recommendations=scope_plan.max_recs,
                     scope_plan=scope_plan,
                     message=message,
+                    focused_setting_id=ui_state.get("focusedSettingId"),
                 )
                 validated["plan"] = {
                     **scope_plan.to_meta(),

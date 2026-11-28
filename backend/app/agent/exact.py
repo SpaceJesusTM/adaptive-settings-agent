@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 
 from ..domain.db import loads
+from ..domain.profile import ProfileService
 from ..domain.values import ValueError_, availability_problem, display_value, normalize_value, values_equal
 from .objective import protected_setting_ids
 from .schemas import AssistantDraft, DraftExplanation, DraftRecommendation
@@ -26,6 +27,9 @@ _RESTORE = re.compile(
     r"^(?:please\s+)?restore\s+(?:the |my )?(.+?)\s+to\s+(?:what it was before|its previous value)"
     r"(?:\s+(?:those|the|that|my)\s+changes?)?(?:[, ]+(?:but\s+)?keep everything else(?: unchanged)?)?$",
     re.I,
+)
+_TEMPORAL_SUFFIX = re.compile(
+    r"\s+(?:for\s+)?(?:just\s+)?(?:tonight|today|this session|for now|right now)$", re.I,
 )
 _SPLIT = re.compile(r"\s*;\s*|(?:[,.]\s+|(?:,?\s+)and\s+)(?=(?:please\s+)?(?:set|change|adjust|switch|enable|disable|turn on|turn off)\b)", re.I)
 
@@ -67,11 +71,11 @@ def exact_draft(store, game: str, message: str) -> AssistantDraft | None:
             toggle = _TOGGLE.fullmatch(clause)
             if not command and not toggle:
                 return None
-            term = command[1] if command else toggle[2]
+            term = command[1] if command else _TEMPORAL_SUFFIX.sub("", toggle[2])
             setting = _setting(store, game, term)
             if setting is None or setting.id in requested:
                 return None
-            raw = command[2] if command else toggle[1].lower()
+            raw = _TEMPORAL_SUFFIX.sub("", command[2]) if command else toggle[1].lower()
             requested[setting.id] = (setting, raw, toggle is not None)
 
     recs = []
@@ -82,7 +86,7 @@ def exact_draft(store, game: str, message: str) -> AssistantDraft | None:
         values = store.flat_values(conn, game)
         hardware = store.hardware(conn)
         locked = set(store.locks(conn, game))
-        protected = protected_setting_ids(store, game, message)
+        protected = protected_setting_ids(store, game, message) | ProfileService(store).objective_protections(conn, game)
         for setting, raw, toggle in requested.values():
             current = values.get(setting.id)
             if restore:
@@ -113,7 +117,7 @@ def exact_draft(store, game: str, message: str) -> AssistantDraft | None:
             if values_equal(current, value):
                 guidance = f"{setting.exactLabel} is already {shown}."
             elif setting.id in protected:
-                guidance = f"You asked to keep {setting.exactLabel} unchanged."
+                guidance = f"Your current goal keeps {setting.exactLabel} unchanged. To change it, edit it directly or clear the goal first."
             elif setting.id in locked:
                 guidance = f"{setting.exactLabel} is locked for assistant changes."
             elif problem:

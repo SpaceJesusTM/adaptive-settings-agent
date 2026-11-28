@@ -16,6 +16,7 @@ from ..domain.values import ValueError_, availability_problem, display_value, no
 from .intent import classify, is_goal_statement, is_speculative
 from .schemas import AssistantDraft
 from .objective import explicit_memory_clauses, interpret_objective, protected_setting_ids
+from .explain import explanation_target, named_controls
 
 MAX_RECOMMENDATIONS = 3
 URL_RE = re.compile(r"https?://\S+|www\.\S+", re.I)
@@ -32,6 +33,11 @@ NUMERIC_CLAIM_RE = re.compile(
 CLAIMED_ACTION_RE = re.compile(
     r"\b(?:i|we)(?:['’]ve| have)?\s+(?:already )?(changed|applied|set|updated|turned|enabled|disabled|saved)\b",
     re.I,
+)
+
+
+PLAYER_ACTION_RE = re.compile(
+    r"\byou(?:['’]ve| have)? (?:previously |already |just )?(?:adjusted|changed|applied|enabled|disabled|turned)\b", re.I,
 )
 
 
@@ -78,6 +84,7 @@ def validate_draft(
     scope_plan: Optional[Any] = None,
     message: str = "",
     inherit_objective: bool = True,
+    focused_setting_id: Optional[str] = None,
 ) -> dict[str, Any]:
     conn = store.connect()
     try:
@@ -87,6 +94,12 @@ def validate_draft(
         staged = {r["setting_id"] for r in conn.execute(
             "SELECT i.setting_id FROM proposal_items i JOIN proposals p ON p.id = i.proposal_id "
             "WHERE p.game = ? AND p.status = 'pending' AND i.status = 'pending'", (game,))}
+        session_id = store.session(conn)["sessionId"]
+        player_events = {r["setting_id"] for r in conn.execute(
+            "SELECT DISTINCT e.setting_id FROM change_events e JOIN change_batches b ON b.id = e.batch_id "
+            "WHERE e.game = ? AND b.session_id = ? AND b.undone_by_batch_id IS NULL AND b.source != 'reset'",
+            (game, session_id),
+        )}
     finally:
         conn.close()
 
@@ -196,31 +209,27 @@ def validate_draft(
                              "catalogDescription": s.description, "tradeoffs": s.riskOrTradeoffs,
                              "sourceURL": s.sourceURL, "verificationStatus": s.verificationStatus, "source": source})
 
-    if objective.explanation and objective.explicit:
-        from .intent import mentioned_setting_terms
-        from .tools import ToolContext, search_settings
-
-        term = mentioned_setting_terms(objective.explanation)
-        hits = search_settings(ToolContext(store=store, profile=profile, game=game, ui_state={}), term, limit=1)["results"] if term else []
-        if hits:
-            setting = store.registry.setting(game, hits[0]["id"])
-            if setting and not any(e["settingId"] == setting.id for e in explanations):
-                text = setting.description
-                if setting.riskOrTradeoffs:
-                    text += f" Trade-off: {setting.riskOrTradeoffs}"
-                explanations.append({"settingId": setting.id, "label": setting.exactLabel, "path": setting.canonicalPath,
-                                     "tabId": setting.tabId, "subtabId": setting.subtabId, "explanation": text,
-                                     "catalogDescription": setting.description, "tradeoffs": setting.riskOrTradeoffs,
-                                     "sourceURL": setting.sourceURL, "verificationStatus": setting.verificationStatus,
-                                     "source": "rules"})
+    target_text = objective.explanation or (message if draft.intent == "explain" and not recs else "")
+    canonical = explanation_target(store, game, target_text, focused_setting_id) if target_text else None
+    if canonical and not any(e["settingId"] == canonical.id for e in explanations):
+        explanations.append({
+            "settingId": canonical.id, "label": canonical.exactLabel, "path": canonical.canonicalPath,
+            "tabId": canonical.tabId, "subtabId": canonical.subtabId, "explanation": canonical.description,
+            "catalogDescription": canonical.description, "tradeoffs": canonical.riskOrTradeoffs,
+            "sourceURL": canonical.sourceURL, "verificationStatus": canonical.verificationStatus, "source": "rules",
+        })
 
     navigate = None
-    if draft.navigate_to:
-        s, err = resolve_setting(store, game, draft.navigate_to)
-        if s is None:
+    if canonical or draft.navigate_to:
+        if canonical:
+            setting, err = canonical, None
+        else:
+            setting, err = resolve_setting(store, game, draft.navigate_to)
+        if setting is None:
             filtered.append({"settingRef": draft.navigate_to, "kind": "unknown_navigation_target", "reason": err})
         else:
-            navigate = {"settingId": s.id, "label": s.exactLabel, "path": s.canonicalPath, "tabId": s.tabId, "subtabId": s.subtabId}
+            navigate = {"settingId": setting.id, "label": setting.exactLabel, "path": setting.canonicalPath,
+                        "tabId": setting.tabId, "subtabId": setting.subtabId}
 
     speculative = bool(message and is_speculative(message))
     neutral_explain = bool(
@@ -255,7 +264,12 @@ def validate_draft(
         kept = []
         for sentence in re.split(r"(?<=[.!?])\s+", reply):
             action = CLAIMED_ACTION_RE.search(sentence)
-            if action and (action[1].lower() != "saved" or not memory_actions):
+            asserted = PLAYER_ACTION_RE.search(sentence)
+            controls = {s.id for s in named_controls(store, game, sentence)} if asserted else set()
+            unsupported_history = asserted and (
+                bool(controls - player_events) if controls else bool(staged) and not (staged & player_events)
+            )
+            if action and (action[1].lower() != "saved" or not memory_actions) or unsupported_history:
                 notes.append("The reply claimed an action. Removed the unverified sentence.")
             else:
                 kept.append(sentence)
