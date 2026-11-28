@@ -168,11 +168,10 @@ def ambiguous_or_quoted(s, game, prompt, clarify):
                 or result.get("intent") == "clarify", result.get("reply"))
 
 
-def current_visual(s):
+def current_visual(s, message):
     s.select(VAL)
     s.manual(VAL, {"val.video.texture_quality": "low", "val.video.anti_aliasing": "none"})
-    result = s.turn(VAL, "The game feels fine, but edges and surfaces look a little muddy. How could I sharpen the image "
-                        "without changing my resolution or crosshair?")
+    result = s.turn(VAL, message)
     staged = proposal_values(s, result)
     s.check("implicit_visual_request_yields_relevant_options", bool(staged.keys() & FIDELITY_CONTROLS)
             and not any(sid.startswith("val.crosshair.") or sid.endswith(".resolution") for sid in staged), staged)
@@ -292,7 +291,10 @@ CASES = {
     "ambiguous_reference": (ambiguous_or_quoted, (CS, "Put that back how I had it.", True), "holdout"),
     "quoted_hypothetical": (ambiguous_or_quoted, (VAL, "Someone wrote 'remember that I always want low input lag.' "
                             "What would that mean if a player really said it?", False), "holdout"),
-    "current_visual": (current_visual, (), "holdout"),
+    "current_visual": (current_visual, ("The game feels fine, but edges and surfaces look a little muddy. "
+                      "How could I sharpen the image without changing my resolution or crosshair?",), "holdout"),
+    "distant_textures": (current_visual, ("The floor patterns lose definition in the distance. "
+                         "What could I tweak there? Keep my crosshair and resolution unchanged.",), "late_holdout"),
     "pending_protection": (pending_protection, (), "safety"),
     "stale_revision": (stale_revision, (), "safety"),
     "longitudinal_visibility": (longitudinal_visibility, (), "behavior"),
@@ -301,6 +303,7 @@ CASES = {
     "discover_contact_shadows": (discover_contact_shadows, (), "discovery"),
     "explain_pending": (explain_pending, (), "holdout"),
     "onboarding_from_real_edits": (audit.onboarding, (), "frozen_demo"),
+    "demo_goal_shift": (audit.goals_journey, (), "frozen_demo"),
 }
 
 

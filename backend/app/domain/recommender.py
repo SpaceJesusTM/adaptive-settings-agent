@@ -10,6 +10,7 @@ Supports four complementary proactive triggers without ever silently applying se
 from __future__ import annotations
 
 import hashlib
+import re
 import sqlite3
 from typing import Any, Optional
 
@@ -874,8 +875,18 @@ class RelevantNowService:
                 "SELECT setting_id FROM dismissals WHERE game = ? AND session_id = ?",
                 (game, self.store.session(conn)["sessionId"]),
             )}
+            settings = self.store.registry.settings(game)
+
+            def label_terms(setting):
+                return {term.removesuffix("s") for term in re.findall(r"[a-z]{4,}", setting.exactLabel.casefold())
+                        if term not in {"quality", "setting", "settings", "enable", "disable"}}
+
+            related_terms: set[str] = set()
+            for setting in settings:
+                if setting.id in seen and dimensions & (set(setting.goalTags) | {h.dimension for h in setting.goalHints}):
+                    related_terms |= label_terms(setting)
             prospects = []
-            for setting in self.store.registry.settings(game):
+            for setting in settings:
                 if (setting.id in seen or setting.id in pending or setting.id in prior_dismissed
                         or not setting.riskOrTradeoffs or availability_problem(self.store.registry, setting, values, hardware)):
                     continue
@@ -899,10 +910,11 @@ class RelevantNowService:
                     "score": 1.8 if objective else 1.25,
                 }
                 specificity = 1 if any(h.dimension in related for h in setting.goalHints) else 0
-                prospects.append((specificity, len(related), int(setting.tabId == "video"), card))
+                related_to_seen = len(label_terms(setting) & related_terms)
+                rank = (-related_to_seen, -specificity, -len(related), setting.order)
+                prospects.append((rank, card))
             if prospects:
-                ranked = sorted(prospects, key=lambda x: (-x[0], -x[1], -x[2], x[3]["order"]))
-                candidates.append(ranked[0][3])
+                candidates.append(min(prospects, key=lambda entry: entry[0])[1])
 
         def utility(card):
             value = 1.8 if card.get("crossGame") else 0.0
