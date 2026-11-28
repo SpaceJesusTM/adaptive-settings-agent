@@ -87,7 +87,7 @@ EXPLANATIONS = (
     ("af", VAL, "What is anisotropic filtering?", "val.video.anisotropic_filtering",
      (r"texture", r"oblique|angle|distance", r"gpu|performance|frame rate")),
     ("vsync", VAL, "What does VSync do?", "val.video.vsync",
-     (r"refresh|synchron", r"tear", r"lag|latency")),
+     (r"refresh|synchron", r"tear", r"lag|latency|input delay")),
     ("reflex", CS, "Explain NVIDIA Reflex.", "cs2.video.nvidia_reflex",
      (r"input|system latency", r"gpu|power|boost", r"frame|bottleneck")),
     ("shadows", CS, "How does Global Shadow Quality differ from Dynamic Shadows?",

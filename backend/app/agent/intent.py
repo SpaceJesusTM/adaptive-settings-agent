@@ -67,13 +67,18 @@ SESSION_HINTS = [r"\btoday\b", r"\bthis session\b", r"\bfor now\b", r"\bjust thi
 DEPRIORITIZE_HINTS = [r"\bdon't care about\b", r"\bdo not care about\b", r"\bless important\b", r"\bnot bothered about\b"]
 
 
+_DIMENSION_PATTERNS = {
+    dimension: re.compile(r"(?<!\w)(?:" + "|".join(re.escape(word) for word in words) + r")(?!\w)")
+    for dimension, words in DIMENSION_KEYWORDS.items()
+}
+
+
 def detect_dimensions(text: str) -> list[str]:
     t = (text or "").lower()
     found: list[tuple[int, str]] = []
-    for dim, words in DIMENSION_KEYWORDS.items():
-        positions = [t.find(w) for w in words if w in t]
-        if positions:
-            found.append((min(positions), dim))
+    for dimension, pattern in _DIMENSION_PATTERNS.items():
+        if match := pattern.search(t):
+            found.append((match.start(), dimension))
     found.sort()
     return [d for _, d in found]
 
