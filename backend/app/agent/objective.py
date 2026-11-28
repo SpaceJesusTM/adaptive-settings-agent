@@ -1,0 +1,156 @@
+"""Shared interpretation of current objectives and explicit setting exclusions."""
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, replace
+
+from .intent import detect_dimensions, detect_explicit_memory, is_goal_statement, is_speculative
+
+_SPLIT = re.compile(
+    r"[.!?;]+(?:\s+|$)|,?\s+\b(?:but|also|and)\s+(?="
+    r"(?:tonight|today|for now|for this session|i still (?:need|want)|explain|remember|keep\b|leave\b|don['’]t\b|do not\b))",
+    re.I,
+)
+_CURRENT = re.compile(r"\b(?:today|tonight|for now|this session|right now)\b", re.I)
+_DURABLE_OR_PREFERENCE = re.compile(
+    r"^\s*(?:also\s+)?(?:remember|from now on|don't forget|keep in mind|"
+    r"i\s+(?:normally|usually|always|prefer|value|would rather|care more|don['’]t (?:really )?care|do not (?:really )?care))\b",
+    re.I,
+)
+_NOT_OBJECTIVE = re.compile(r"^\s*(?:also\s+)?(?:keep|leave|don't|do not|avoid|everything except)\b", re.I)
+_TEMPORARY_END = re.compile(
+    r"^\s*(?:(?:actually|okay|ok|now)[, ]+)?(?:"
+    r"(?:clear|end|drop|stop|forget)(?:\s+about)?\s+(?:my |the |this |that )?(?:temporary |current |session )?(?:goal|objective)"
+    r"|(?:go |switch |return )?back to (?:my |the )?usual (?:priorities|preferences)"
+    r")\s*[.!?]*$", re.I,
+)
+_PROTECT = re.compile(
+    r"\b(?:keep|leave|preserve)\s+(?P<keep>[^.!?;]{1,155}?)\s+"
+    r"(?:unchanged|as (?:it|they) (?:is|are)|exactly as (?:it|they) (?:is|are)|the same|alone)\b"
+    r"|\b(?:don['’]t|do not|never)\s+(?:change|touch|adjust|modify)\s+(?P<avoid>[^.!?;]{1,110})"
+    r"|\b(?P<only>(?:only\s+(?:change|adjust|configure|touch)|configure)\s+(?:the\s+)?"
+    r"(?:graphics|video)(?: and frame[- ]pacing)?(?:\s+settings)?)\b",
+    re.I,
+)
+_END_PROTECTION = re.compile(r",?\s+(?:and |also )?(?:explain|remember|but|then)\b", re.I)
+
+
+@dataclass(frozen=True)
+class Objective:
+    text: str
+    dimensions: list[str]
+    explanation: str | None
+    clear: bool
+    explicit: bool
+
+
+def interpret_objective(message: str) -> Objective:
+    clauses = [part.strip(" ,") for part in _SPLIT.split(message.strip()) if part.strip(" ,")]
+    clear = bool(_TEMPORARY_END.fullmatch(message))
+    explanation = next((p for p in clauses if re.match(r"^(?:also\s+)?explain\b", p, re.I)), None)
+    current = [
+        p for p in clauses
+        if not _NOT_OBJECTIVE.search(p)
+        and not re.match(r"^(?:also\s+)?(?:and\s+)?(?:explain|where|why|what does|what are the downsides)\b", p, re.I)
+        and (not _DURABLE_OR_PREFERENCE.search(p) or _CURRENT.search(p))
+    ]
+    text = ". ".join(current)
+    positive_text = re.split(r"\b(?:willing to sacrifice|at the cost of|at the expense of)\b", text, maxsplit=1, flags=re.I)[0]
+    dims = detect_dimensions(positive_text)
+    explicit = bool(text and not clear and not is_speculative(text) and is_goal_statement(text, dims))
+    return Objective(text, dims, explanation, clear, explicit)
+
+
+def objective_takes_precedence(text: str) -> bool:
+    return bool(_CURRENT.search(text) or re.search(r"\b(configure|optimi[sz]e|make|set me up|instead)\b", text, re.I))
+
+
+def protected_setting_ids(store, game: str, message: str) -> set[str]:
+    settings = store.registry.settings(game)
+    matches = list(_PROTECT.finditer(message))
+    protected: set[str] = set()
+    for match in matches:
+        if match["only"]:
+            protected.update(s.id for s in settings if s.tabId != "video" or s.controlType == "preset")
+            continue
+        terms = _END_PROTECTION.split(match["keep"] or match["avoid"], maxsplit=1)[0].lower()
+        for s in settings:
+            label = s.exactLabel.lower()
+            if (
+                (len(label) >= 4 and re.search(rf"(?<!\w){re.escape(label)}(?!\w)", terms))
+                or ("resolution" in terms and "resolution" in label)
+                or ("aspect ratio" in terms and "aspect ratio" in label)
+                or ("sensitivity" in terms and "sensitivity" in label)
+                or (re.fullmatch(r"(?:my |the )?shadows", terms.strip()) and "shadow" in label)
+                or ("crosshair" in terms and (s.tabId == "crosshair" or ".crosshair." in s.id))
+                or (re.search(r"\baudio\b|\bsound settings\b", terms) and s.tabId == "audio")
+                or (re.search(r"\b(?:controls|keybinds|key bindings)\b", terms)
+                    and (s.controlType == "keybind" or s.tabId in {"controls", "kbmouse"}
+                         or "sensitivity" in label))
+            ):
+                protected.add(s.id)
+    return protected
+
+
+def prepare_objective(store, profile, conn, game: str, message: str, scope_override: str | None):
+    from .scope import classify_scope
+
+    objective = interpret_objective(message)
+    scope_plan = classify_scope(
+        objective.text or message,
+        detected_dims=objective.dimensions,
+        has_saved_prefs=bool(profile.applicable_preferences(conn, game)),
+        scope_override=scope_override,
+    )
+    if objective.dimensions and any(match["only"] for match in _PROTECT.finditer(message)):
+        scope_plan = replace(scope_plan, inferred_dimensions=objective.dimensions)
+    # A fresh task starts from applicable preferences. The preceding objective remains active
+    # for follow-ups until replaced or cleared.
+    new_objective = objective.explicit and bool(scope_plan.inferred_dimensions) and not scope_plan.is_supplement
+    weights = profile.dimension_weights(conn, game, include_objective=not new_objective)
+    if new_objective:
+        profile.prioritize_objective(weights, scope_plan.inferred_dimensions, "your request in this chat",
+                                     takes_precedence=objective_takes_precedence(objective.text))
+    protected = protected_setting_ids(store, game, message)
+    if not new_objective:
+        protected.update(profile.objective_protections(conn, game))
+    return objective, scope_plan, weights, protected
+
+
+def explicit_memory_clauses(message: str, game: str) -> list[dict]:
+    """Persist only values and preferences that can be grounded directly in the user's words."""
+    actions = {}
+    for clause in _SPLIT.split(message.replace("’", "'")):
+        clause = re.sub(r"^\s*(?:and |also )+", "", clause, flags=re.I)
+        # A quoted or embedded request is insufficient evidence to save anything.
+        if not re.match(r"^\s*(?:please\s+)?(?:remember|don['’]t forget|from now on|i always|always)\b", clause, re.I):
+            continue
+        if re.search(r"\b(?:might|maybe|not sure|considering)\b", clause, re.I):
+            continue
+        named_scope = re.findall(r"\b(?:in|for)\s+(valorant|cs2)\b", clause, re.I)
+        if len(set(name.lower() for name in named_scope)) > 1:
+            continue
+        for action in detect_explicit_memory(clause, game):
+            if action["kind"] == "fact" and _CURRENT.search(clause):
+                continue
+            if action["kind"] == "preference":
+                action["appliesToGame"] = named_scope[0].lower() if named_scope else None
+            key = (action.get("dimension") or action.get("factKey"), action.get("appliesToGame"), action["game"], action["scope"])
+            actions[key] = action
+    return list(actions.values())[:3]
+
+
+def preference_removal(message: str) -> tuple[str, str | None] | None:
+    """Recognize a narrowly phrased withdrawal of one remembered dimension."""
+    match = re.fullmatch(
+        r"\s*(?:actually[, ]+)?forget (?:what i said about|my (?:saved )?preference for) (.+?)[.!]?\s*",
+        message, re.I,
+    )
+    if not match:
+        return None
+    topic = match[1]
+    dimensions = detect_dimensions(topic)
+    scope = re.findall(r"\b(?:in|for)\s+(valorant|cs2)\b", topic, re.I)
+    if len(dimensions) != 1 or len(set(name.lower() for name in scope)) > 1:
+        return None
+    return dimensions[0], scope[0].lower() if scope else None

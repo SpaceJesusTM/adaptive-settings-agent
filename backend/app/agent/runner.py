@@ -14,6 +14,11 @@ from typing import Any, Callable, Optional
 import httpx
 from ollama import ResponseError
 
+from .exact import exact_draft
+from .explain import comparison_draft
+from .objective import interpret_objective, preference_removal
+from .schemas import AssistantDraft
+from .scope import ScopePlan
 from ..catalog.schema import DIMENSION_LABELS
 from ..config import Settings
 from ..domain.db import dumps, loads, new_id, now_iso, write_tx
@@ -26,7 +31,7 @@ from ..domain.store import Store
 from .fallback import fallback_turn
 from .graph import InvalidModelToolCall, build_turn_graph, make_chat_models
 from .health import describe_status, model_label, probe_ollama
-from .intent import is_goal_statement, is_speculative
+from .intent import is_speculative
 from .validate import validate_draft
 
 ModelFactory = Callable[[Settings], tuple[Any, Any]]
@@ -244,6 +249,33 @@ class AgentRunner:
                 ai_mode = self.store.session(conn).get("aiMode", "local")
             finally:
                 conn.close()
+            objective = interpret_objective(message)
+            if objective.clear:
+                direct_draft = AssistantDraft(intent="other", reply="I cleared the current goal. Your saved preferences still apply.")
+            elif preference_removal(message):
+                direct_draft = AssistantDraft(intent="preference", reply="I checked System Understanding for that preference.")
+            else:
+                direct_draft = exact_draft(self.store, game, message) or comparison_draft(self.store, game, message)
+            if direct_draft is not None:
+                handle.step("Checking the requested settings")
+                scope = ScopePlan(
+                    scope="focused" if direct_draft.recommendations else "explain_only",
+                    max_recs=len(direct_draft.recommendations),
+                    auto_stage=bool(direct_draft.recommendations),
+                    include_minor=False,
+                    is_supplement=False,
+                    reason="Grounded request handled with catalogue, history or profile rules.",
+                    inferred_dimensions=[],
+                )
+                validated = validate_draft(self.store, game, direct_draft, source="rules",
+                                           max_recommendations=scope.max_recs, scope_plan=scope, message=message,
+                                           inherit_objective=False)
+                # Exact setting commands and history recovery do not establish an optimization objective.
+                validated.update(goalDimensions=[], goalChanged=False, plan={**scope.to_meta(), "autoStage": scope.auto_stage})
+                self._finish(handle, status=status, result=validated,
+                             provenance={"source": "rules", "model": None, "indicator": "Catalogue and history"},
+                             trace=trace, model_calls=model_calls, error=None, message=message)
+                return
             probe = await probe_ollama(self.settings) if ai_mode != "fallback" else {"state": "not_configured"}
             indicator = describe_status(probe, ai_mode)
             if ai_mode == "fallback":
@@ -423,17 +455,28 @@ class AgentRunner:
                     result = {**result, "provenance": {**(provenance or {}), "latencyMs": latency}}
                     msg_text = (message or "").strip()
                     speculative = bool(msg_text and is_speculative(msg_text))
-                    if (
-                        msg_text
-                        and not speculative
-                        and result.get("goalDimensions")
-                        and (
-                            result.get("intent") == "recommend"
-                            or result.get("goalChanged")
-                            or is_goal_statement(msg_text, result["goalDimensions"])
+                    objective = interpret_objective(msg_text)
+                    removal = preference_removal(msg_text)
+                    if removal:
+                        dimension, scope_game = removal
+                        matches = [p for p in self.profile.applicable_preferences(conn, scope_game or handle.game)
+                                   if p["dimension"] == dimension and p["appliesToGame"] == scope_game]
+                        if len(matches) == 1:
+                            self.profile.remove_preference_tx(conn, matches[0]["id"])
+                            result["reply"] = f"Removed your saved {DIMENSION_LABELS[dimension]} preference."
+                            sync_trigger = "memory_update"
+                        elif matches:
+                            result["reply"] = "I found multiple matching preferences. Choose which one to remove in System Understanding."
+                        else:
+                            result["reply"] = "I couldn't find a saved preference matching that wording and game scope."
+                    elif objective.clear:
+                        self.profile.clear_session_goals_tx(conn, handle.game)
+                        sync_trigger = "goal_change"
+                    elif result.get("goalChanged") and result.get("goalDimensions"):
+                        goal_id = self.profile.set_session_goal(
+                            conn, handle.game, objective.text, result["goalDimensions"], "chat",
+                            set(result.get("protectedSettingIds") or ()),
                         )
-                    ):
-                        goal_id = self.profile.set_session_goal(conn, handle.game, msg_text[:160], result["goalDimensions"], "chat")
                         if goal_id:
                             result["sessionGoalId"] = goal_id
                             sync_trigger = "goal_change"
@@ -455,6 +498,7 @@ class AgentRunner:
                                     game=target_g,
                                     origin_game=target_g,
                                     note=mem.get("quote"),
+                                    applies_to_game=mem.get("appliesToGame"),
                                 )
                                 applied_updates.append({
                                     "kind": "preference",
@@ -464,6 +508,7 @@ class AgentRunner:
                                     "direction": direction,
                                     "scope": scope,
                                     "game": target_g,
+                                    "appliesToGame": mem.get("appliesToGame"),
                                     "label": f"{'Prioritize' if direction == 'prioritize' else 'De-prioritize'} {DIMENSION_LABELS[dim]} ({scope})",
                                 })
                                 sync_trigger = sync_trigger or "memory_update"

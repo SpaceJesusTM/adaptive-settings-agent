@@ -85,7 +85,14 @@ class ProposalService:
             item_dims = list(dict.fromkeys(d for it in items if it["status"] == "pending" for d in it.get("dimensions", [])))
             compare_dims = snap_goal_dims or item_dims
 
-            if p["source"] == "history" and (item_dims or (plan_obj or {}).get("inferredDimensions")) and cur_goal:
+            protected_items = {it["settingId"] for it in items if it["status"] == "pending"} & set(
+                (cur_goal or {}).get("protectedSettingIds") or ()
+            )
+            proposal_is_exact = p["source"] == "rules" and (plan_obj or {}).get("scope") == "focused"
+            if protected_items and not proposal_is_exact:
+                freshness_status = "outdated_goal"
+                freshness_warning = "This draft includes settings your current goal asks to keep unchanged. Review those items before applying."
+            elif p["source"] == "history" and (item_dims or (plan_obj or {}).get("inferredDimensions")) and cur_goal:
                 hist_dims = item_dims or list((plan_obj or {}).get("inferredDimensions") or [])
                 cur_dims = set(cur_goal.get("dimensions") or [])
                 has_conflict = any(set(CONFLICT_PAIRS.get(cd, ())) & set(hist_dims) for cd in cur_dims)

@@ -7,6 +7,7 @@ import { Chat } from "./Chat";
 
 export function PreferencesPanel({ game }: { game: GameId }) {
   const profile = useAppStore((s) => s.profile);
+  const catalogue = useAppStore((s) => s.catalogs[game]);
   const removePreference = useAppStore((s) => s.removePreference);
   const clearGoals = useAppStore((s) => s.clearGoals);
   const addPreference = useAppStore((s) => s.addPreference);
@@ -69,6 +70,16 @@ export function PreferencesPanel({ game }: { game: GameId }) {
           <div key={g.id} className="goal-chip">
             <span>“{g.text}”</span>
             <small>Focus: {g.dimensions.map((d) => profile.dimensions.find((x) => x.id === d)?.label ?? d).join(", ")}</small>
+            {g.protectedSettingIds?.length ? (
+              <details>
+                <summary>Settings kept unchanged ({g.protectedSettingIds.length})</summary>
+                <ul>
+                  {catalogue?.settings.filter((s) => g.protectedSettingIds?.includes(s.id)).map((s) => (
+                    <li key={s.id}>{s.exactLabel}</li>
+                  ))}
+                </ul>
+              </details>
+            ) : null}
           </div>
         ))}
         {conflicts.map((c, idx) => (
@@ -157,7 +168,7 @@ export function PreferencesPanel({ game }: { game: GameId }) {
               <span className={`dir dir-${p.direction}`}>
                 {p.direction === "prioritize" ? "▲" : "▼"} {p.dimensionLabel}
               </span>
-              <small className="pref-origin">This session only · {timeAgo(p.createdAt)}</small>
+              <small className="pref-origin">This session only{p.appliesToGame ? ` · ${gameName(p.appliesToGame)}` : ""} · {timeAgo(p.createdAt)}</small>
             </div>
             <button type="button" className="link" onClick={() => void removePreference(p.id)}>
               remove
@@ -171,7 +182,7 @@ export function PreferencesPanel({ game }: { game: GameId }) {
                 {p.direction === "prioritize" ? "▲" : "▼"} {p.dimensionLabel}
               </span>
               <small className="pref-origin">
-                Lasting across games{p.originGame ? ` · ${gameName(p.originGame)}` : ""} ·{" "}
+                {p.appliesToGame ? `Lasting in ${gameName(p.appliesToGame)}` : "Lasting across games"} ·{" "}
                 {p.source === "chat_explicit"
                   ? "remembered from chat"
                   : p.source === "chat_confirmed"

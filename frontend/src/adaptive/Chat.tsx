@@ -139,7 +139,7 @@ function AssistantMessage({ game, msg }: { game: GameId; msg: ChatMessage }) {
             </>
           ) : (
             <>
-              Offline fallback — rule-based, not AI-generated
+              {res.provenance.source === "rules" ? "Catalogue and history rules" : "Offline fallback — rule-based, not AI-generated"}
               {res.provenance.fallbackReason ? ` · ${res.provenance.fallbackReason}` : ""}
             </>
           )}
@@ -195,7 +195,7 @@ function AssistantMessage({ game, msg }: { game: GameId; msg: ChatMessage }) {
                   void stage(
                     game,
                     res.recommendations,
-                    res.provenance.source === "ai" ? "ai" : "fallback",
+                    res.provenance.source,
                     msg.runId ?? null,
                     `Suggested changes (${res.recommendations.length})`,
                   )

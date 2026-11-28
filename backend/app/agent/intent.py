@@ -8,12 +8,12 @@ from typing import Optional
 DIMENSION_KEYWORDS: dict[str, list[str]] = {
     "performance": ["fps", "frame rate", "framerate", "frames", "frame drop", "stutter", "choppy", "smooth", "smoother",
                     "performance", "lag spike", "low-end", "laptop", "drops", "dips", "runs badly", "slow pc"],
-    "input_latency": ["input lag", "input delay", "latency", "delay", "responsive", "responsiveness", "low lag",
+    "input_latency": ["input lag", "input delay", "latency", "lower latency", "delay", "responsive", "responsiveness", "low lag",
                       "reaction", "competitive edge"],
     "visibility": ["see enemies", "see players", "spot enemies", "spot players", "visibility", "visible", "clarity",
-                   "clear view", "clearer", "player visibility", "contrast", "hard to see", "seeing enemies"],
-    "visual_quality": ["look better", "looks better", "pretty", "beautiful", "eye candy", "visual quality",
-                       "graphics quality", "max graphics", "nicer"],
+                   "clear view", "clearer", "player visibility", "contrast", "hard to see", "seeing enemies", "clear enemies", "see opponents"],
+    "visual_quality": ["look better", "looks better", "pretty", "beautiful", "eye candy", "visual quality", "visual fidelity", "visually detailed", "polished", "richer lighting",
+                       "graphics quality", "max graphics", "look nice", "look great", "nicer"],
     "audio_awareness": ["footstep", "footsteps", "hear", "hearing", "sound direction", "audio cue", "positional audio",
                         "directional", "headphones"],
     "communication": ["voice chat", "mic", "microphone", "comms", "callout", "callouts", "teammates talk", "push to talk"],
@@ -103,6 +103,8 @@ def preference_scope(text: str) -> str:
 
 def preference_direction_for(text: str, dimension: str) -> str:
     t = (text or "").lower()
+    if re.search(r"\bde[- ]?prioriti[sz]e\b|\bput less weight on\b", t) and dimension in detect_dimensions(t):
+        return "deprioritize"
     if _any(DEPRIORITIZE_HINTS, t):
         # "I don't care about X" -> X is de-prioritized when X is the dimension mentioned after the phrase.
         m = re.search(r"(don't|do not) care about ([a-z \-]+)", t)

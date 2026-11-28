@@ -183,7 +183,7 @@ def search_settings(ctx: ToolContext, query: str, limit: int = 6) -> dict[str, A
 def get_user_preferences(ctx: ToolContext) -> dict[str, Any]:
     conn = ctx.store.connect()
     try:
-        prefs = ctx.profile.preferences(conn)
+        prefs = ctx.profile.applicable_preferences(conn, ctx.game)
         goals = ctx.profile.session_goals(conn, ctx.game)
         facts = ctx.profile.personal_facts(conn)
         context = ctx.profile.active_context(conn, ctx.game)

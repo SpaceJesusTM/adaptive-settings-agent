@@ -11,11 +11,11 @@ import re
 from typing import Any, Optional
 
 from ..catalog.schema import DIMENSION_LABELS, Setting
-from ..domain.profile import PERSONAL_FACT_TYPES
 from ..domain.store import Store
 from ..domain.values import ValueError_, availability_problem, display_value, normalize_value, values_equal
-from .intent import classify, detect_dimensions, is_goal_statement, is_speculative
+from .intent import classify, is_goal_statement, is_speculative
 from .schemas import AssistantDraft
+from .objective import explicit_memory_clauses, interpret_objective, protected_setting_ids
 
 MAX_RECOMMENDATIONS = 3
 URL_RE = re.compile(r"https?://\S+|www\.\S+", re.I)
@@ -29,7 +29,10 @@ NUMERIC_CLAIM_RE = re.compile(
     rf"|\d+(?:\.\d+)?\s*{_UNIT}\s*(?:more|faster|higher|lower|less|better|improvement|boost|gain|increase|reduction)\b"
     r"|\b(?:doubles?|triples?|\d+x)\s+(?:your\s+)?(?:fps|frame ?rate|performance)\b",
     re.I)
-CLAIMED_ACTION_RE = re.compile(r"\b(i('ve| have)|we('ve| have))\s+(changed|applied|set|updated|turned|enabled|disabled|saved)\b", re.I)
+CLAIMED_ACTION_RE = re.compile(
+    r"\b(?:i|we)(?:['’]ve| have)?\s+(?:already )?(changed|applied|set|updated|turned|enabled|disabled|saved)\b",
+    re.I,
+)
 
 
 def _clean(text: Optional[str], limit: int) -> str:
@@ -74,6 +77,7 @@ def validate_draft(
     max_recommendations: int = MAX_RECOMMENDATIONS,
     scope_plan: Optional[Any] = None,
     message: str = "",
+    inherit_objective: bool = True,
 ) -> dict[str, Any]:
     conn = store.connect()
     try:
@@ -89,11 +93,15 @@ def validate_draft(
     # Ground "based on ..." in the user's actual stored goals/preferences rather than trusting model text.
     from ..domain.profile import ProfileService  # local import avoids a cycle at module load
 
+    objective = interpret_objective(message)
+    protected = protected_setting_ids(store, game, message)
     conn = store.connect()
     try:
         profile = ProfileService(store)
         weights = profile.dimension_weights(conn, game)
-        saved_prefs = {(p["dimension"], p["direction"]) for p in profile.preferences(conn)}
+        saved_prefs = {(p["dimension"], p["direction"]) for p in profile.applicable_preferences(conn, game)}
+        if inherit_objective and (not objective.explicit or not objective.dimensions or getattr(scope_plan, "is_supplement", False)):
+            protected.update(profile.objective_protections(conn, game))
     finally:
         conn.close()
 
@@ -114,6 +122,10 @@ def validate_draft(
         if not s.aiProposable or s.controlType in ("keybind", "preset", "color"):
             filtered.append({**base, "settingId": s.id, "kind": "not_proposable",
                              "reason": f"{s.exactLabel} is a personal or hardware-specific setting; the assistant does not propose values for it."})
+            continue
+        if s.id in protected:
+            filtered.append({**base, "settingId": s.id, "kind": "protected_by_request",
+                             "reason": f"You asked to keep {s.exactLabel} unchanged."})
             continue
         if s.id in locks:
             filtered.append({**base, "settingId": s.id, "kind": "locked", "reason": f"{s.exactLabel} is locked by you, so it was not suggested."})
@@ -184,6 +196,24 @@ def validate_draft(
                              "catalogDescription": s.description, "tradeoffs": s.riskOrTradeoffs,
                              "sourceURL": s.sourceURL, "verificationStatus": s.verificationStatus, "source": source})
 
+    if objective.explanation and objective.explicit:
+        from .intent import mentioned_setting_terms
+        from .tools import ToolContext, search_settings
+
+        term = mentioned_setting_terms(objective.explanation)
+        hits = search_settings(ToolContext(store=store, profile=profile, game=game, ui_state={}), term, limit=1)["results"] if term else []
+        if hits:
+            setting = store.registry.setting(game, hits[0]["id"])
+            if setting and not any(e["settingId"] == setting.id for e in explanations):
+                text = setting.description
+                if setting.riskOrTradeoffs:
+                    text += f" Trade-off: {setting.riskOrTradeoffs}"
+                explanations.append({"settingId": setting.id, "label": setting.exactLabel, "path": setting.canonicalPath,
+                                     "tabId": setting.tabId, "subtabId": setting.subtabId, "explanation": text,
+                                     "catalogDescription": setting.description, "tradeoffs": setting.riskOrTradeoffs,
+                                     "sourceURL": setting.sourceURL, "verificationStatus": setting.verificationStatus,
+                                     "source": "rules"})
+
     navigate = None
     if draft.navigate_to:
         s, err = resolve_setting(store, game, draft.navigate_to)
@@ -210,34 +240,9 @@ def validate_draft(
     elif draft.preference_suggestions:
         notes.append("Treated tentative or informational question without proposing preference changes.")
 
-    memory_actions = []
-    if not speculative and not (message and classify(message) == "navigate"):
-        for m in getattr(draft, "explicit_memory_actions", [])[:3]:
-            target_g = m.game if m.game in ("valorant", "cs2") else game
-            quote = _clean(m.user_quote, 180)
-            if m.kind == "preference" and m.dimension in DIMENSION_LABELS:
-                memory_actions.append({
-                    "kind": "preference",
-                    "dimension": m.dimension,
-                    "dimensionLabel": DIMENSION_LABELS[m.dimension],
-                    "direction": m.direction if m.direction in ("prioritize", "deprioritize") else "prioritize",
-                    "scope": m.scope if m.scope in ("session", "durable") else "durable",
-                    "game": target_g,
-                    "quote": quote,
-                })
-            elif m.kind == "fact" and m.fact_key in PERSONAL_FACT_TYPES and m.value_text:
-                val_txt = _clean(m.value_text, 80)
-                if val_txt:
-                    memory_actions.append({
-                        "kind": "fact",
-                        "factKey": m.fact_key,
-                        "valueText": val_txt,
-                        "scope": "durable",
-                        "game": target_g,
-                        "quote": quote,
-                    })
-    elif getattr(draft, "explicit_memory_actions", None):
-        notes.append("Did not save memory from a speculative remark.")
+    memory_actions = explicit_memory_clauses(message, game) if not speculative else []
+    if getattr(draft, "explicit_memory_actions", None) and not memory_actions:
+        notes.append("No directly supported memory instruction was found in the request.")
 
     # Do not duplicate explicit memory updates inside confirmation chips
     if memory_actions and prefs:
@@ -246,33 +251,43 @@ def validate_draft(
 
     reply = _clean(draft.reply, 1800)
     reply = _drop_numeric_claims(reply, notes, "the reply")
-    if CLAIMED_ACTION_RE.search(reply):
-        notes.append("The reply claimed an action; nothing has been changed - suggestions only take effect when you apply them.")
+    if source == "ai":
+        kept = []
+        for sentence in re.split(r"(?<=[.!?])\s+", reply):
+            action = CLAIMED_ACTION_RE.search(sentence)
+            if action and (action[1].lower() != "saved" or not memory_actions):
+                notes.append("Removed an unverified claim that the assistant made a change.")
+            else:
+                kept.append(sentence)
+        reply = " ".join(kept)
     if not reply:
         reply = "Here is what I found." if (recs or explanations or memory_actions) else "I could not produce a reliable answer for that."
 
     valid_goal_dims = [d for d in dict.fromkeys(draft.goal_dimensions) if d in DIMENSION_LABELS][:5]
-    explicit_pref_turn = bool(memory_actions and draft.intent == "preference")
-    if speculative or (neutral_explain and not recs) or explicit_pref_turn:
+    explicit_pref_turn = bool(memory_actions and draft.intent == "preference" and not objective.explicit)
+    if speculative or (neutral_explain and not recs and not objective.explicit) or explicit_pref_turn:
         valid_goal_dims = []
     elif not valid_goal_dims and draft.intent != "clarify":
         # Backfill goal dimensions when a local model supplies recommendations or goal phrasing without goal_dimensions.
         candidates_dims: list[str] = []
         if scope_plan is not None:
             candidates_dims.extend(getattr(scope_plan, "inferred_dimensions", []) or [])
-        if message and is_goal_statement(message):
-            candidates_dims.extend(detect_dimensions(message))
+        if objective.explicit:
+            candidates_dims.extend(objective.dimensions)
         candidates_dims.extend(p["dimension"] for p in prefs if p.get("direction") == "prioritize")
         if draft.intent == "recommend":
             candidates_dims.extend(r["dimension"] for r in recs if r.get("dimension"))
         valid_goal_dims = [d for d in dict.fromkeys(candidates_dims) if d in DIMENSION_LABELS][:5]
 
+    if objective.explicit and objective.dimensions:
+        valid_goal_dims = list(getattr(scope_plan, "inferred_dimensions", None) or objective.dimensions)[:5]
     goal_changed = bool(
-        (getattr(draft, "goal_changed", False) or (message and is_goal_statement(message, valid_goal_dims)))
+        objective.explicit
         and valid_goal_dims
         and not speculative
-        and not neutral_explain
+        and not (neutral_explain and not objective.dimensions)
         and not explicit_pref_turn
+        and not getattr(scope_plan, "is_supplement", False)
     )
 
     return {
@@ -281,6 +296,7 @@ def validate_draft(
         "knownsAndUnknowns": _drop_numeric_claims(_clean(draft.knowns_and_unknowns, 450), notes, "the uncertainty note") or None,
         "goalDimensions": valid_goal_dims,
         "goalChanged": goal_changed,
+        "protectedSettingIds": sorted(protected),
         "recommendations": recs,
         "explanations": explanations,
         "navigateTo": navigate,

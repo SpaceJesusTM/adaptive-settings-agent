@@ -65,6 +65,7 @@ def build_coverage_audit(
     weights: dict[str, dict[str, Any]],
     scope_plan: ScopePlan,
     exclude_staged: bool = True,
+    protected: frozenset[str] | set[str] = frozenset(),
     exclude_dismissed: bool = False,
 ) -> dict[str, Any]:
     """Audit the entire game catalogue against active goal weights and safety boundaries."""
@@ -122,6 +123,10 @@ def build_coverage_audit(
         relevant_hints = [h for h in s.goalHints if h.dimension in positive]
         relevant_tags = [t for t in s.goalTags if t in positive]
         top_dim, top_dim_label, top_why = _goal_why_for(s, positive)
+
+        if s.id in protected:
+            not_relevant_count += 1
+            continue
 
         if not s.aiProposable or s.controlType in ("keybind", "preset"):
             if relevant_hints or relevant_tags:

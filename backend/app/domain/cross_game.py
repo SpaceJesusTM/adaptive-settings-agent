@@ -469,7 +469,7 @@ def compare_cross_game(
         (d["factKey"], d["game"]): d
         for d in detect_fact_discrepancies(store, profile, conn)
     }
-    prefs = [p for p in profile.preferences(conn) if p["scope"] == "durable"]
+    prefs = [p for p in profile.applicable_preferences(conn, tgt_game) if p["scope"] == "durable"]
 
     scored: list[tuple[int, dict[str, Any]]] = []
     broad_transfer = any(

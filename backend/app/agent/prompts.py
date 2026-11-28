@@ -105,7 +105,7 @@ def _state_lines(ctx: ToolContext, conn, *, compact: bool = False) -> list[str]:
     session = store.session(conn)
     locks = set(store.locks(conn, game))
     hw = store.hardware(conn)
-    prefs = profile.preferences(conn)
+    prefs = profile.applicable_preferences(conn, game)
     goals = profile.session_goals(conn, game)
     context_event = profile.active_context(conn, game)
     pending = conn.execute(
@@ -332,6 +332,8 @@ def render_context(
                 line += f" | VALORANT: {val_txt}"
             if cs2_txt:
                 line += f" | CS2: {cs2_txt}"
+            if comp.get("sourceEvidenceLabel"):
+                line += f" | source value evidence: {comp['sourceEvidenceLabel']}"
             if comp.get("discrepancyNote"):
                 line += f" | DISCREPANCY (MUST DISCLOSE): {comp['discrepancyNote']}"
             conv = comp.get("sensitivityConversion")

@@ -441,7 +441,7 @@ export interface PreferenceSuggestion {
 }
 
 export interface Provenance {
-  source: "ai" | "fallback";
+  source: "ai" | "fallback" | "rules";
   model: string | null;
   modelTag?: string | null;
   fallbackReason?: string | null;
@@ -616,6 +616,7 @@ export interface Preference {
   scope: "durable" | "session";
   game: GameId | null;
   originGame: GameId | null;
+  appliesToGame?: GameId | null;
   source: string;
   note: string | null;
   createdAt: string;
@@ -653,6 +654,7 @@ export interface GoalPreferenceConflict {
 
 export interface SessionGoal {
   id: string;
+  protectedSettingIds?: string[];
   text: string;
   dimensions: string[];
   source: string;

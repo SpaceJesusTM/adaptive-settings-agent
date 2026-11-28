@@ -140,6 +140,7 @@ class ProfileService:
                 "scope": r["scope"],
                 "game": r["game"],
                 "originGame": r["origin_game"],
+                "appliesToGame": r["applies_to_game"],
                 "source": r["source"],
                 "note": r["note"],
                 "createdAt": r["created_at"],
@@ -147,8 +148,14 @@ class ProfileService:
             })
         return out
 
+    def applicable_preferences(self, conn: sqlite3.Connection, game: str) -> list[dict[str, Any]]:
+        applicable = [p for p in self.preferences(conn) if p["appliesToGame"] in (None, game)]
+        specific = {(p["dimension"], p["scope"]) for p in applicable if p["appliesToGame"] == game}
+        return [p for p in applicable if p["appliesToGame"] or (p["dimension"], p["scope"]) not in specific]
+
     def add_preference(self, *, dimension: str, direction: str, scope: str, source: str,
-                       game: Optional[str], origin_game: Optional[str], note: Optional[str]) -> dict[str, Any]:
+                       game: Optional[str], origin_game: Optional[str], note: Optional[str],
+                       applies_to_game: Optional[str] = None) -> dict[str, Any]:
         if dimension not in DIMENSIONS:
             raise Invalid(f"Unknown preference dimension '{dimension}'")
         if direction not in ("prioritize", "deprioritize"):
@@ -169,6 +176,7 @@ class ProfileService:
                     game=game,
                     origin_game=origin_game,
                     note=note,
+                    applies_to_game=applies_to_game,
                 )
             return {"id": pid}
         finally:
@@ -185,21 +193,24 @@ class ProfileService:
         game: Optional[str],
         origin_game: Optional[str],
         note: Optional[str],
+        applies_to_game: Optional[str] = None,
     ) -> str:
         """Persist a confirmed preference inside an active write transaction."""
+        if applies_to_game is not None:
+            self.store.require_game(applies_to_game)
         sess = self.store.session(conn)
         conn.execute(
             "UPDATE preferences SET active = 0, updated_at = ? WHERE dimension = ? AND scope = ? AND active = 1 "
-            "AND (scope = 'durable' OR session_id = ?)",
-            (now_iso(), dimension, scope, sess["sessionId"]),
+            "AND applies_to_game IS ? AND (scope = 'durable' OR session_id = ?)",
+            (now_iso(), dimension, scope, applies_to_game, sess["sessionId"]),
         )
         pid = new_id("pref")
         ts = now_iso()
         conn.execute(
-            "INSERT INTO preferences(id, dimension, direction, scope, session_id, game, origin_game, source, note, active, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,1,?,?)",
+            "INSERT INTO preferences(id, dimension, direction, scope, session_id, game, origin_game, source, note, active, created_at, updated_at, applies_to_game) "
+            "VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?)",
             (pid, dimension, direction, scope, sess["sessionId"] if scope == "session" else None, game,
-             origin_game or game, source, note, ts, ts),
+             origin_game or game, source, note, ts, ts, applies_to_game),
         )
         self.add_evidence(
             conn,
@@ -217,15 +228,18 @@ class ProfileService:
         conn = self.store.connect()
         try:
             with write_tx(conn):
-                row = conn.execute("SELECT * FROM preferences WHERE id = ?", (pref_id,)).fetchone()
-                if row is None:
-                    raise NotFound("Unknown preference")
-                conn.execute("UPDATE preferences SET active = 0, updated_at = ? WHERE id = ?", (now_iso(), pref_id))
-                self.add_evidence(conn, kind="preference_removed", dimension=row["dimension"], game=row["game"],
-                                  preference_id=pref_id,
-                                  detail=f"Removed preference for {DIMENSION_LABELS.get(row['dimension'], row['dimension'])}")
+                self.remove_preference_tx(conn, pref_id)
         finally:
             conn.close()
+
+    def remove_preference_tx(self, conn: sqlite3.Connection, pref_id: str) -> None:
+        row = conn.execute("SELECT * FROM preferences WHERE id = ?", (pref_id,)).fetchone()
+        if row is None:
+            raise NotFound("Unknown preference")
+        conn.execute("UPDATE preferences SET active = 0, updated_at = ? WHERE id = ?", (now_iso(), pref_id))
+        self.add_evidence(conn, kind="preference_removed", dimension=row["dimension"], game=row["game"],
+                          preference_id=pref_id,
+                          detail=f"Removed preference for {DIMENSION_LABELS.get(row['dimension'], row['dimension'])}")
 
     def add_evidence(self, conn: sqlite3.Connection, *, kind: str, dimension: Optional[str] = None,
                      game: Optional[str] = None, setting_id: Optional[str] = None, proposal_id: Optional[str] = None,
@@ -239,7 +253,7 @@ class ProfileService:
     def snapshot_context(self, conn: sqlite3.Connection, game: str) -> dict[str, Any]:
         """Lightweight snapshot of active goals/priorities used to detect semantically stale proposals later."""
         goals = self.session_goals(conn, game)
-        prefs = self.preferences(conn)
+        prefs = self.applicable_preferences(conn, game)
         ctx = self.active_context(conn, game)
         return {
             "goalText": goals[0]["text"] if goals else None,
@@ -262,11 +276,19 @@ class ProfileService:
             "SELECT * FROM session_goals WHERE active = 1 AND session_id = ? AND game = ? ORDER BY created_at",
             (sess["sessionId"], game)).fetchall()
         return [{"id": r["id"], "text": r["text"], "dimensions": loads(r["dimensions_json"], []), "source": r["source"],
-                 "createdAt": r["created_at"]} for r in rows]
+                 "createdAt": r["created_at"], "protectedSettingIds": loads(r["protected_setting_ids_json"], [])} for r in rows]
 
-    def set_session_goal(self, conn: sqlite3.Connection, game: str, text: str, dimensions: list[str], source: str) -> Optional[str]:
+    def objective_protections(self, conn: sqlite3.Connection, game: str) -> set[str]:
+        return {sid for goal in self.session_goals(conn, game) for sid in goal["protectedSettingIds"]}
+
+    def set_session_goal(self, conn: sqlite3.Connection, game: str, text: str, dimensions: list[str], source: str,
+                         protected_setting_ids: Optional[set[str]] = None) -> Optional[str]:
         dims = [d for d in dict.fromkeys(dimensions) if d in DIMENSIONS]
         if not dims:
+            return None
+        existing = self.session_goals(conn, game)
+        protected = sorted(protected_setting_ids or ())
+        if existing and existing[0]["text"] == text[:200] and existing[0]["dimensions"] == dims and existing[0]["protectedSettingIds"] == protected:
             return None
         sess = self.store.session(conn)
         # The newest explicit goal replaces earlier ones for this game/session (a "goal change").
@@ -274,18 +296,21 @@ class ProfileService:
                      (sess["sessionId"], game))
         gid = new_id("goal")
         conn.execute(
-            "INSERT INTO session_goals(id, session_id, game, text, dimensions_json, source, active, created_at) VALUES (?,?,?,?,?,?,1,?)",
-            (gid, sess["sessionId"], game, text[:200], dumps(dims), source, now_iso()))
+            "INSERT INTO session_goals(id, session_id, game, text, dimensions_json, source, active, created_at, protected_setting_ids_json) VALUES (?,?,?,?,?,?,1,?,?)",
+            (gid, sess["sessionId"], game, text[:200], dumps(dims), source, now_iso(), dumps(protected)))
         return gid
 
     def clear_session_goals(self, game: str) -> None:
         conn = self.store.connect()
         try:
             with write_tx(conn):
-                sess = self.store.session(conn)
-                conn.execute("UPDATE session_goals SET active = 0 WHERE session_id = ? AND game = ?", (sess["sessionId"], game))
+                self.clear_session_goals_tx(conn, game)
         finally:
             conn.close()
+
+    def clear_session_goals_tx(self, conn: sqlite3.Connection, game: str) -> None:
+        sess = self.store.session(conn)
+        conn.execute("UPDATE session_goals SET active = 0 WHERE session_id = ? AND game = ?", (sess["sessionId"], game))
 
     # ------------------------------------------------------------------ simulated context
     def active_context(self, conn: sqlite3.Connection, game: str) -> Optional[dict[str, Any]]:
@@ -309,7 +334,8 @@ class ProfileService:
                          (new_id("ctx"), game, event_type, sess["sessionId"], now_iso()))
 
     # ------------------------------------------------------------------ weights
-    def dimension_weights(self, conn: sqlite3.Connection, game: str) -> dict[str, dict[str, Any]]:
+    def dimension_weights(self, conn: sqlite3.Connection, game: str, *,
+                          include_objective: bool = True) -> dict[str, dict[str, Any]]:
         weights: dict[str, dict[str, Any]] = {}
 
         def add(dim: str, w: float, reason: dict[str, Any]) -> None:
@@ -317,10 +343,7 @@ class ProfileService:
             entry["weight"] = round(entry["weight"] + w, 3)
             entry["reasons"].append(reason)
 
-        for g in self.session_goals(conn, game):
-            for d in g["dimensions"]:
-                add(d, WEIGHT_SESSION_GOAL, {"kind": "session_goal", "text": f"your current goal \"{g['text']}\" (this session)"})
-        for p in self.preferences(conn):
+        for p in self.applicable_preferences(conn, game):
             sign = 1 if p["direction"] == "prioritize" else -1
             if p["scope"] == "session":
                 add(p["dimension"], sign * WEIGHT_SESSION_PREF,
@@ -335,7 +358,27 @@ class ProfileService:
         if ctx:
             for d in ctx["dimensions"]:
                 add(d, WEIGHT_CONTEXT, {"kind": "context", "text": f"simulated context: {ctx['label'].lower()}"})
+        if include_objective:
+            from ..agent.objective import objective_takes_precedence
+
+            for goal in self.session_goals(conn, game):
+                self.prioritize_objective(weights, goal["dimensions"], f"your current goal: {goal['text']}",
+                                          takes_precedence=objective_takes_precedence(goal["text"]))
         return weights
+
+    @staticmethod
+    def prioritize_objective(weights: dict[str, dict[str, Any]], dimensions: list[str], text: str, *,
+                             takes_precedence: bool) -> None:
+        # Current dimensions dominate older preferences. Retain older reasons for conflict explanations.
+        ceiling = max((abs(w["weight"]) for w in weights.values()), default=0.0)
+        opposing = {other for d in dimensions for other in CONFLICT_PAIRS.get(d, ())} - set(dimensions)
+        for dimension in opposing:
+            if takes_precedence and dimension in weights:
+                weights[dimension]["weight"] = min(0.0, weights[dimension]["weight"])
+        for dimension in dimensions:
+            entry = weights.setdefault(dimension, {"weight": 0.0, "reasons": []})
+            entry["weight"] = round((ceiling if takes_precedence else entry["weight"]) + WEIGHT_SESSION_GOAL, 3)
+            entry["reasons"].insert(0, {"kind": "session_goal", "text": text})
 
     @staticmethod
     def signature(weights: dict[str, dict[str, Any]]) -> str:
@@ -457,7 +500,7 @@ class ProfileService:
         goals = self.session_goals(conn, game)
         if not goals:
             return []
-        prefs = self.preferences(conn)
+        prefs = self.applicable_preferences(conn, game)
         conflicts: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
         for g in goals:

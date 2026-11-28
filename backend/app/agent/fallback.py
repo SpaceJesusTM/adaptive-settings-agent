@@ -16,7 +16,6 @@ from ..domain.store import Store
 from .intent import (
     classify,
     detect_dimensions,
-    detect_explicit_memory,
     extract_sensitivity_number,
     is_cross_game_query,
     is_goal_statement,
@@ -26,7 +25,8 @@ from .intent import (
     preference_scope,
 )
 from .schemas import AssistantDraft, DraftExplanation, DraftMemoryAction, DraftPreference, DraftRecommendation
-from .scope import ScopePlan, classify_scope
+from .scope import ScopePlan
+from .objective import explicit_memory_clauses, prepare_objective
 from .tools import ToolContext, search_settings
 
 
@@ -62,18 +62,10 @@ def fallback_turn(
 
     conn = store.connect()
     try:
-        weights = profile.dimension_weights(conn, game)
-        has_saved_prefs = bool(profile.preferences(conn))
-        scope_plan = classify_scope(
-            message,
-            detected_dims=dims,
-            has_saved_prefs=has_saved_prefs,
-            scope_override=scope_override,
+        objective, scope_plan, weights, protected = prepare_objective(
+            store, profile, conn, game, message, scope_override,
         )
-        for d in scope_plan.inferred_dimensions:
-            entry = weights.setdefault(d, {"weight": 0.0, "reasons": []})
-            entry["weight"] = round(entry["weight"] + 1.0, 3)
-            entry["reasons"].insert(0, {"kind": "message", "text": "your request in this chat"})
+        has_saved_prefs = bool(profile.applicable_preferences(conn, game))
         audit = build_coverage_audit(
             store,
             profile,
@@ -83,6 +75,7 @@ def fallback_turn(
             scope_plan=scope_plan,
             exclude_staged=True,
             exclude_dismissed=False,
+            protected=protected,
         )
     finally:
         conn.close()
@@ -111,7 +104,7 @@ def fallback_turn(
             audit,
         )
 
-    mem_actions_raw = detect_explicit_memory(message, game)
+    mem_actions_raw = explicit_memory_clauses(message, game)
     mem_drafts = [
         DraftMemoryAction(
             kind=m["kind"],
@@ -242,7 +235,7 @@ def fallback_turn(
             audit,
         )
 
-    if intent == "explain":
+    if intent == "explain" and not (objective.explanation and objective.explicit):
         term = mentioned_setting_terms(message) or message
         hits = search_settings(ctx, term, limit=2)["results"]
         if hits:
@@ -270,7 +263,7 @@ def fallback_turn(
             audit,
         )
 
-    if intent == "preference":
+    if intent == "preference" and not (objective.explicit and scope_plan.auto_stage):
         prefs = [
             DraftPreference(
                 dimension=d,
@@ -400,7 +393,7 @@ def fallback_turn(
                 )
 
     eff_dims = scope_plan.inferred_dimensions or list(dims)
-    if scope_plan.scope != "explain_only" and (intent == "recommend" or eff_dims or has_saved_prefs):
+    if scope_plan.scope != "explain_only" and (intent == "recommend" or eff_dims or has_saved_prefs or objective.explicit):
         selected = audit["candidates"][: scope_plan.max_recs]
         goal = ", ".join(DIMENSION_LABELS[d] for d in eff_dims) if eff_dims else "your saved preferences"
         if not selected:
@@ -413,7 +406,7 @@ def fallback_turn(
                 AssistantDraft(
                     intent="recommend",
                     goal_dimensions=eff_dims[:5],
-                    reply=f"{', '.join(summary_bits)}. No additional changes are needed for {goal}.",
+                    reply=f"{', '.join(summary_bits)}. I found no additional eligible changes for {goal}.",
                     knowns_and_unknowns="Offline suggestions cannot measure your PC; they compare against catalogue goals and locks.",
                 ),
                 scope_plan,

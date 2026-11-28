@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -252,6 +252,10 @@ MIGRATIONS: dict[int, str] = {
         created_at TEXT NOT NULL,
         UNIQUE(game, rule_id, trigger_batch_id)
     );
+    """,
+    5: """
+    ALTER TABLE preferences ADD COLUMN applies_to_game TEXT;
+    ALTER TABLE session_goals ADD COLUMN protected_setting_ids_json TEXT NOT NULL DEFAULT '[]';
     """,
 }
 

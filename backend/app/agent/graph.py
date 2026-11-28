@@ -26,12 +26,8 @@ from ..domain.planner import build_coverage_audit
 from ..domain.profile import ProfileService
 from ..domain.store import Store
 from .intent import (
-    detect_dimensions,
-    detect_explicit_memory,
     extract_sensitivity_number,
     is_cross_game_query,
-    is_goal_statement,
-    is_speculative,
 )
 from .prompts import (
     compose_batch_messages,
@@ -43,7 +39,8 @@ from .prompts import (
     scope_instruction_for,
 )
 from .schemas import AssistantDraft, BatchDraft, DraftRecommendation
-from .scope import ScopePlan, classify_scope
+from .scope import ScopePlan
+from .objective import prepare_objective
 from .tools import MAX_TOOL_RESULT_CHARS, ToolContext, get_current_ui_state, get_user_preferences, langchain_tools, run_tool, search_settings
 from .validate import needs_repair, validate_draft
 
@@ -157,19 +154,9 @@ def build_turn_graph(
 
         conn = store.connect()
         try:
-            weights = profile.dimension_weights(conn, state["game"])
-            has_saved_prefs = bool(profile.preferences(conn))
-            detected = detect_dimensions(state["message"])
-            scope_plan = classify_scope(
-                state["message"],
-                detected_dims=detected,
-                has_saved_prefs=has_saved_prefs,
-                scope_override=state.get("scope_override"),
+            objective, scope_plan, weights, protected = prepare_objective(
+                store, profile, conn, state["game"], state["message"], state.get("scope_override"),
             )
-            for d in scope_plan.inferred_dimensions:
-                entry = weights.setdefault(d, {"weight": 0.0, "reasons": []})
-                entry["weight"] = round(entry["weight"] + 1.0, 3)
-                entry["reasons"].insert(0, {"kind": "message", "text": "your request in this chat"})
             audit = build_coverage_audit(
                 store,
                 profile,
@@ -179,6 +166,7 @@ def build_turn_graph(
                 scope_plan=scope_plan,
                 exclude_staged=True,
                 exclude_dismissed=False,
+                protected=protected,
             )
         finally:
             conn.close()
@@ -253,6 +241,11 @@ def build_turn_graph(
             audit=audit,
             cross_game_data=cross_game_data,
         )
+        if protected:
+            labels = [s.exactLabel for s in store.registry.settings(state["game"]) if s.id in protected and s.aiProposable]
+            context += "\nKEEP UNCHANGED (explicit user constraint): " + ", ".join(labels)
+        if objective.explanation:
+            context += "\nAlso address this explanation independently: " + objective.explanation[:200]
         return {
             "scope_plan": scope_plan,
             "weights": weights,
@@ -503,18 +496,6 @@ def build_turn_graph(
         )
         feedback = needs_repair(draft, validated, state["message"], scope_plan=scope_plan, audit=audit)
         if validated is not None:
-            if not is_speculative(state["message"]):
-                det_mem = detect_explicit_memory(state["message"], state["game"])
-                existing_keys = {
-                    (m.get("kind"), m.get("dimension") or m.get("factKey"), m.get("game"))
-                    for m in validated.get("explicitMemoryActions", [])
-                }
-                for dm in det_mem:
-                    k = (dm.get("kind"), dm.get("dimension") or dm.get("factKey"), dm.get("game"))
-                    if k not in existing_keys:
-                        validated.setdefault("explicitMemoryActions", []).append(dm)
-                if not validated.get("goalChanged") and validated.get("goalDimensions") and is_goal_statement(state["message"], validated["goalDimensions"]):
-                    validated["goalChanged"] = True
             partial = bool(state.get("batch_partial", False))
             completed = int(state.get("batches_completed", 1))
             total = int(state.get("batches_total", 1))
