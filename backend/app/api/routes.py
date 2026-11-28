@@ -618,6 +618,7 @@ def clear_goals(game: str, request: Request) -> dict[str, Any]:
     s = svc(request)
     s.store.require_game(game)
     s.profile.clear_session_goals(game)
+    _sync_discover_event(s, game, "goal_change")
     return {"ok": True}
 
 

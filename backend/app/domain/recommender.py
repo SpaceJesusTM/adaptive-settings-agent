@@ -117,6 +117,12 @@ def _dismissal_signature(weights: dict[str, dict[str, Any]], extra: str = "") ->
     return hashlib.sha1(f"{base}:{extra}".encode()).hexdigest()[:12]
 
 
+def _candidate_dismissal(card: dict[str, Any]) -> str:
+    # A change in unrelated profile evidence should not resurrect an equivalent suggestion.
+    key = [card.get("triggerGroup"), card.get("kind"), card.get("dimension"), card.get("targetValue")]
+    return "candidate:" + dumps(key)
+
+
 def rank_candidates(
     store: Store,
     profile: ProfileService,
@@ -152,11 +158,19 @@ def rank_candidates(
         )
     } if exclude_dismissed else set()
 
+    scoped_dismissals = {
+        (r["setting_id"], r["signature"])
+        for r in conn.execute(
+            "SELECT setting_id, signature FROM dismissals WHERE game = ? AND session_id = ? AND signature LIKE 'candidate:%'",
+            (game, store.session(conn)["sessionId"]),
+        )
+    } if exclude_dismissed else set()
+    protected = profile.objective_protections(conn, game)
     out: list[dict[str, Any]] = []
     for s in store.registry.settings(game):
         if not s.aiProposable or s.controlType in ("keybind", "preset") or not s.goalHints:
             continue
-        if s.id in locked or s.id in staged or s.id in dismissed:
+        if s.id in locked or s.id in staged or s.id in dismissed or s.id in protected:
             continue
         if availability_problem(store.registry, s, values, hardware):
             continue
@@ -193,9 +207,9 @@ def rank_candidates(
         if best_score <= 0:
             continue
         reasons = weights[best_hint.dimension]["reasons"]
-        has_ctx = any(r.get("kind") == "context" for r in reasons)
+        has_ctx = bool(reasons and all(r.get("kind") == "context" for r in reasons))
         trigger_group = "context_event" if has_ctx else "goal_or_preference"
-        out.append({
+        card = {
             "kind": "change",
             "triggerGroup": trigger_group,
             "triggerLabel": TRIGGER_LABELS[trigger_group],
@@ -220,7 +234,9 @@ def rank_candidates(
             "sourceURL": s.sourceURL,
             "verificationStatus": s.verificationStatus,
             "order": s.order,
-        })
+        }
+        if (s.id, _candidate_dismissal(card)) not in scoped_dismissals:
+            out.append(card)
     out.sort(key=lambda c: (-c["score"], c["order"]))
     return out[:limit]
 
@@ -441,7 +457,7 @@ def build_onboarding_cards(
 
         if fk == "mouse_sensitivity":
             if other_disc and other_obs:
-                conv = convert_hipfire_sensitivity(other_game, game, str(other_obs["value"]), confirmed=other_obs["deliberate"])
+                conv = convert_hipfire_sensitivity(other_game, game, str(other_obs["value"]), confirmed=other_obs["sourceKind"] == "user_manual")
                 conv_note = (
                     f" Using your live {other_title} value ({other_obs['display']}), a 360° hipfire match is ~{conv['convertedValue']} ({conv['formula']})."
                     if conv.get("convertible")
@@ -488,7 +504,7 @@ def build_onboarding_cards(
                     caveat,
                     cross_game=True,
                 )
-            elif other_obs and other_obs["deliberate"]:
+            elif other_obs and other_obs["sourceKind"] == "user_manual":
                 conv = convert_hipfire_sensitivity(other_game, game, str(other_obs["value"]), confirmed=True)
                 conv_str = f" (approx. {conv['convertedValue']} in {title_game}, {conv['formula']})" if conv.get("convertible") else ""
                 c = make_inspect(
@@ -594,7 +610,7 @@ def build_onboarding_cards(
                     "Keybindings are personal ergonomics and are never copied automatically.",
                     cross_game=True,
                 )
-            elif other_obs and other_obs["deliberate"]:
+            elif other_obs and other_obs["sourceKind"] == "user_manual":
                 c = make_inspect(
                     cur_sid,
                     check_id,
@@ -639,7 +655,7 @@ def build_onboarding_cards(
             continue
 
         if fk == "ping_key":
-            has_ping_signal = bool(other_fact or other_disc or same_disc or (other_obs and other_obs["deliberate"]))
+            has_ping_signal = bool(other_fact or other_disc or same_disc or (other_obs and other_obs["sourceKind"] == "user_manual"))
             if not has_ping_signal:
                 continue
             if other_disc and other_obs:
@@ -654,7 +670,7 @@ def build_onboarding_cards(
                     f"Check whether {title_game}'s ping key ({cur_obs['display']}) matches what feels natural."
                 )
                 based = [f"your remembered {other_title} ping key ({other_fact['valueText']})"]
-            elif other_obs and other_obs["deliberate"]:
+            elif other_obs and other_obs["sourceKind"] == "user_manual":
                 why = (
                     f"Your live {other_title} ping key is set to {other_obs['display']} ({other_obs['sourceLabel']}). "
                     f"Inspect {title_game}'s {cur_obs['display']} keybind manually if you use quick callouts."
@@ -672,7 +688,7 @@ def build_onboarding_cards(
                 why,
                 based,
                 dim,
-                1.18 if (other_fact or other_obs and other_obs["deliberate"]) else 1.11,
+                1.18 if (other_fact or other_obs and other_obs["sourceKind"] == "user_manual") else 1.11,
                 "Keybindings stay under manual user control.",
                 cross_game=True,
             )
@@ -785,9 +801,56 @@ class RelevantNowService:
                     state = "suggested"
         return {**card, "state": state, "liveValue": cur, "liveDisplay": display_value(s, cur)}
 
+    def _aligned_inspection(
+        self, conn: sqlite3.Connection, game: str, goal: dict[str, Any], protected: set[str],
+    ) -> Optional[dict[str, Any]]:
+        """Offer one read-only learning opportunity when there is no eligible goal change."""
+        values = self.store.flat_values(conn, game)
+        hardware = self.store.hardware(conn)
+        sess_id = self.store.session(conn)["sessionId"]
+        dimensions = set(goal["dimensions"])
+        for setting in self.store.registry.settings(game):
+            if setting.id in protected or setting.controlType == "preset" or availability_problem(
+                self.store.registry, setting, values, hardware,
+            ):
+                continue
+            current = values.get(setting.id)
+            hint = next((h for h in setting.goalHints if h.dimension in dimensions
+                         and any(values_equal(current, value) for value in h.prefer)), None)
+            if hint is None or not setting.aiProposable:
+                continue
+            observed = observe_setting(self.store, conn, game, setting.id)
+            if not observed or observed["deliberate"]:
+                continue
+            card = {
+                "kind": "inspect", "triggerGroup": "goal_or_preference",
+                "triggerLabel": "Already fits your current goal", "settingId": setting.id,
+                "label": setting.exactLabel, "path": setting.canonicalPath,
+                "currentValue": current, "currentDisplay": display_value(setting, current),
+                "targetValue": current, "targetDisplay": "Inspect setting", "score": 0.5,
+                "dimension": hint.dimension, "dimensionLabel": DIMENSION_LABELS[hint.dimension],
+                "whatItDoes": setting.description, "whatItDoesSource": setting.descriptionSource,
+                "why": f"Your current value already fits this goal. {hint.why}",
+                "whyOrigin": "goal_hint", "whyBasis": hint.basis, "basedOn": [goal["text"]],
+                "tradeoff": setting.riskOrTradeoffs, "crossGame": False, "order": setting.order,
+                "sourceURL": setting.sourceURL, "verificationStatus": setting.verificationStatus,
+            }
+            dismissed = conn.execute(
+                "SELECT 1 FROM dismissals WHERE game = ? AND setting_id = ? AND session_id = ? AND signature = ?",
+                (game, setting.id, sess_id, _candidate_dismissal(card)),
+            ).fetchone()
+            if not dismissed:
+                return card
+        return None
+
     def _collect_candidates(self, conn: sqlite3.Connection, game: str) -> list[dict[str, Any]]:
         weights = self.profile.dimension_weights(conn, game)
-        followup_cards = detect_followup_cards(self.store, self.profile, conn, game)
+        protected = self.profile.objective_protections(conn, game)
+        followup_cards = [
+            c for c in detect_followup_cards(self.store, self.profile, conn, game)
+            if c["settingId"] not in protected
+            and not (c["kind"] == "change" and c.get("dimension") in weights and weights[c["dimension"]]["weight"] <= 0)
+        ]
         goal_cards = rank_candidates(self.store, self.profile, conn, game, weights=weights, limit=MAX_RELEVANT_NOW)
         ctx_cards = [c for c in goal_cards if c.get("triggerGroup") == "context_event"]
         non_ctx_goal_cards = [c for c in goal_cards if c.get("triggerGroup") != "context_event"]
@@ -798,6 +861,15 @@ class RelevantNowService:
             game,
             has_priority_recs=bool(non_ctx_goal_cards),
         )
+        # Generic checks remain available on first visit. Once an objective is active,
+        # only cross-game evidence or a directly relevant onboarding check earns a slot.
+        objectives = self.profile.session_goals(conn, game)
+        if objectives:
+            ob_cards = [c for c in ob_cards if c.get("crossGame") or weights.get(c.get("dimension"), {}).get("weight", 0) > 0]
+        if objectives and not (goal_cards or followup_cards or ob_cards):
+            aligned = self._aligned_inspection(conn, game, objectives[0], protected)
+            if aligned:
+                return [aligned]
         merged: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
         has_cross_ob = any(c.get("crossGame") for c in ob_cards)
@@ -879,14 +951,26 @@ class RelevantNowService:
             with write_tx(conn):
                 weights = self.profile.dimension_weights(conn, game)
                 cands = self._collect_candidates(conn, game)
-                items = [{**c, "cardId": new_id("card"), "state": "suggested"} for c in cands]
+                old = conn.execute("SELECT * FROM relevant_now WHERE game = ?", (game,)).fetchone()
+                previous = loads(old["items_json"], []) if old else []
+                existing = {c["settingId"]: c for c in previous if c["state"] != "dismissed"}
+                items = []
+                for card in cands:
+                    prior = existing.get(card["settingId"])
+                    if prior and all(prior.get(key) == card.get(key) for key in
+                                     ("triggerGroup", "kind", "dimension", "targetValue", "checkId", "triggerBatchId", "why")):
+                        card_id = prior["cardId"]
+                    else:
+                        card_id = new_id("card")
+                    items.append({**card, "cardId": card_id, "state": "suggested"})
                 sig = self._state_signature(conn, game, weights)
-                conn.execute(
-                    "INSERT INTO relevant_now(game, items_json, signature, trigger, created_at) VALUES (?,?,?,?,?) "
-                    "ON CONFLICT(game) DO UPDATE SET items_json = excluded.items_json, signature = excluded.signature, "
-                    "trigger = excluded.trigger, created_at = excluded.created_at",
-                    (game, dumps(items), sig, trigger, now_iso()),
-                )
+                if not old or items != previous or old["signature"] != sig or trigger == "user_refresh":
+                    conn.execute(
+                        "INSERT INTO relevant_now(game, items_json, signature, trigger, created_at) VALUES (?,?,?,?,?) "
+                        "ON CONFLICT(game) DO UPDATE SET items_json = excluded.items_json, signature = excluded.signature, "
+                        "trigger = excluded.trigger, created_at = excluded.created_at",
+                        (game, dumps(items), sig, trigger, now_iso()),
+                    )
         finally:
             conn.close()
         return self.get(game)
@@ -952,12 +1036,13 @@ class RelevantNowService:
             with write_tx(conn):
                 weights = self.profile.dimension_weights(conn, game)
                 sess_id = self.store.session(conn)["sessionId"]
+                row = conn.execute("SELECT items_json FROM relevant_now WHERE game = ?", (game,)).fetchone()
+                active = next((c for c in loads(row["items_json"], []) if c["settingId"] == setting_id), None) if row else None
+                signature = _candidate_dismissal(active) if active else ProfileService.signature(weights)
                 conn.execute(
                     "INSERT INTO dismissals(id, game, setting_id, reason, signature, session_id, created_at) VALUES (?,?,?,?,?,?,?)",
-                    (new_id("dis"), game, setting_id, reason, ProfileService.signature(weights),
-                     sess_id, now_iso()),
+                    (new_id("dis"), game, setting_id, reason, signature, sess_id, now_iso()),
                 )
-                row = conn.execute("SELECT items_json FROM relevant_now WHERE game = ?", (game,)).fetchone()
                 if row:
                     items = loads(row["items_json"], [])
                     for c in items:
