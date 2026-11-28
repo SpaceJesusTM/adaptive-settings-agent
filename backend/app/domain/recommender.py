@@ -881,19 +881,22 @@ class RelevantNowService:
                 return {term.removesuffix("s") for term in re.findall(r"[a-z]{4,}", setting.exactLabel.casefold())
                         if term not in {"quality", "setting", "settings", "enable", "disable"}}
 
-            related_terms: set[str] = set()
+            seen_by_term: dict[tuple[str, str], Setting] = {}
             for setting in settings:
                 if setting.id in seen and dimensions & (set(setting.goalTags) | {h.dimension for h in setting.goalHints}):
-                    related_terms |= label_terms(setting)
+                    for term in label_terms(setting):
+                        seen_by_term[(setting.tabId, term)] = setting
             prospects = []
             for setting in settings:
                 if (setting.id in seen or setting.id in pending or setting.id in prior_dismissed
                         or not setting.riskOrTradeoffs or availability_problem(self.store.registry, setting, values, hardware)):
                     continue
                 related = dimensions & (set(setting.goalTags) | {h.dimension for h in setting.goalHints})
-                if not related:
+                comparisons = [seen_by_term[(setting.tabId, term)] for term in sorted(label_terms(setting))
+                               if (setting.tabId, term) in seen_by_term]
+                if not related and not comparisons:
                     continue
-                dimension = max(sorted(related), key=lambda d: weights.get(d, {}).get("weight", 0))
+                dimension = max(sorted(related or dimensions), key=lambda d: weights.get(d, {}).get("weight", 0))
                 current = values.get(setting.id)
                 reason = objective["text"] if objective else signals[0]["explanation"]
                 card = {
@@ -903,15 +906,16 @@ class RelevantNowService:
                     "currentValue": current, "currentDisplay": display_value(setting, current),
                     "dimension": dimension, "dimensionLabel": DIMENSION_LABELS[dimension],
                     "whatItDoes": setting.description, "whatItDoesSource": setting.descriptionSource,
-                    "why": f"This setting can help you understand a trade-off for {DIMENSION_LABELS[dimension]}.",
+                    "why": (f"Compare this with {comparisons[0].exactLabel}, which you have already encountered, "
+                            f"to understand the difference for {DIMENSION_LABELS[dimension]}." if comparisons
+                            else f"This setting can help you understand a trade-off for {DIMENSION_LABELS[dimension]}."),
                     "whyOrigin": "goal_hint", "whyBasis": "editorial", "basedOn": [reason],
                     "tradeoff": setting.riskOrTradeoffs, "verificationStatus": setting.verificationStatus,
                     "sourceURL": setting.sourceURL, "crossGame": False, "order": setting.order,
                     "score": 1.8 if objective else 1.25,
                 }
                 specificity = 1 if any(h.dimension in related for h in setting.goalHints) else 0
-                related_to_seen = len(label_terms(setting) & related_terms)
-                rank = (-related_to_seen, -specificity, -len(related), setting.order)
+                rank = (-len(comparisons), -specificity, -len(related), setting.order)
                 prospects.append((rank, card))
             if prospects:
                 candidates.append(min(prospects, key=lambda entry: entry[0])[1])
@@ -962,7 +966,11 @@ class RelevantNowService:
         if objectives:
             ob_cards = [c for c in ob_cards if c.get("crossGame") or weights.get(c.get("dimension"), {}).get("weight", 0) > 0]
         if self.policy == "utility":
-            return self._utility_selection(conn, game, weights, objectives, protected, followup_cards + goal_cards + ob_cards)
+            selected = self._utility_selection(conn, game, weights, objectives, protected, followup_cards + goal_cards + ob_cards)
+            if selected or not objectives:
+                return selected
+            aligned = self._aligned_inspection(conn, game, objectives[0], protected)
+            return [aligned] if aligned else []
         if objectives and not (goal_cards or followup_cards or ob_cards):
             aligned = self._aligned_inspection(conn, game, objectives[0], protected)
             if aligned:
