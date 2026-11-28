@@ -223,8 +223,11 @@ def longitudinal_visibility(s, control=False):
     profile = s.profile(CS)
     signals = profile["observed"].get("tentativeSignals", [])
     observed = next((item for item in signals if item.get("dimension") == "visibility"), None)
+    discovery = audit.card_items(audit.active_cards(s.discover(CS)))
     s.check("independent_manual_history_differs_from_accepting_a_draft", bool(observed) is not control
-            and no_confirmed_memory(s, CS), {"signals": signals, "visibilityControls": {k: s.values(CS)[k] for k in VISIBILITY_CONTROLS}})
+            and no_confirmed_memory(s, CS), {"signals": signals,
+                                           "visibilityControls": {k: s.values(CS)[k] for k in sorted(VISIBILITY_CONTROLS)},
+                                           "discover": discovery})
 
 
 def fixture_after_select(s, game, values):
