@@ -16,7 +16,10 @@ from .schemas import AssistantDraft, DimensionLit, DraftRecommendation
 from .scope import ScopePlan
 
 _REQUESTS_CHANGE = re.compile(r"\b(?:fix|adjust|configure|optimi[sz]e|change|set up|help|make|recommend|suggest)\b", re.I)
-_ADVICE_REQUEST = re.compile(r"\b(?:how|what) (?:can|could|should) i\b", re.I)
+_ADVICE_REQUEST = re.compile(
+    r"^\s*(?:how (?:can|could|should) i (?!(?:find|tell|know|learn|understand|check|see where)\b)"
+    r"|what (?:can|could|should) i (?:tweak|change|adjust|set|toggle|try)\b)", re.I,
+)
 _CONTRAST = re.compile(r"\b(?:except|rather than|more than|care more|worth|unless|but|instead|same as)\b", re.I)
 _HARD_WORDS = re.compile(r"\b(?:keep|leave|preserve|alone|unchanged|avoid|never|don't|do not|no changes|without)\b", re.I)
 
@@ -109,7 +112,10 @@ def apply_interpretation(store, game, message, objective, scope, protected, pars
         objective = replace(objective, text=clause, dimensions=dims, explicit=True)
         if scope.scope == "explain_only":
             request = clauses.get(parsed.request_clause, "")
-            requested_options = request and (_REQUESTS_CHANGE.search(request) or _ADVICE_REQUEST.search(request))
+            requested_options = request and (
+                (_REQUESTS_CHANGE.search(request) and not _HARD_WORDS.match(request))
+                or any(_ADVICE_REQUEST.match(part) for part in clauses.values())
+            )
             scope = replace(scope, scope="category_optimization", max_recs=8,
                             auto_stage=bool(requested_options),
                             reason="Objective inferred from the current request.")

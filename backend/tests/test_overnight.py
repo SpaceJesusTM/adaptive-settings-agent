@@ -127,3 +127,23 @@ def test_manual_update_during_inference_excludes_only_stale_setting(services, cl
         assert value_of(services, "valorant", "val.video.bloom")["value"] == "on"
 
     asyncio.run(play())
+
+
+def test_semantic_staging_requires_a_grounded_request_for_options(services):
+    from app.agent.decisions import Interpretation, apply_interpretation, numbered_clauses
+    from app.agent.objective import interpret_objective, protected_setting_ids
+    from app.agent.scope import classify_scope
+
+    for message, can_stage in (
+        ("The floor looks soft. How could I make its texture sharper? Keep Resolution unchanged.", True),
+        ("The floor looks soft. Do not change Resolution.", False),
+    ):
+        clauses = numbered_clauses(message)
+        objective = interpret_objective(message)
+        protected = protected_setting_ids(services.store, "valorant", message)
+        parsed = Interpretation(action="recommend", objective_clause=1, request_clause=1, dimensions=["visual_quality"])
+        _objective, scope, exclusions, _clarified = apply_interpretation(
+            services.store, "valorant", message, objective, classify_scope(message), protected, parsed, clauses,
+        )
+        assert scope.auto_stage is can_stage
+        assert "val.video.resolution" in exclusions
