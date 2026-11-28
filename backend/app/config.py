@@ -85,6 +85,8 @@ class Settings:
     store_chat_history: bool
     cors_origins: list[str] = field(default_factory=list)
     agent_fast_path: bool = True
+    agent_reasoning_mode: str = "legacy"
+    agent_discovery_policy: str = "current"
 
     @property
     def backend_connect_host(self) -> str:
@@ -105,6 +107,7 @@ def get_settings() -> Settings:
     origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]
     if not origins:
         origins = [f"http://127.0.0.1:{frontend_port}", f"http://localhost:{frontend_port}"]
+    reasoning_mode = os.environ.get("AGENT_REASONING_MODE", "legacy").strip().lower()
     return Settings(
         project_root=PROJECT_ROOT,
         catalog_dir=data_dir / "catalogs",
@@ -126,4 +129,6 @@ def get_settings() -> Settings:
         store_chat_history=_bool("STORE_CHAT_HISTORY", True),
         cors_origins=origins,
         agent_fast_path=_bool("AGENT_FAST_PATH", True),
+        agent_reasoning_mode=reasoning_mode if reasoning_mode in {"legacy", "compact", "semantic"} else "legacy",
+        agent_discovery_policy="utility" if os.environ.get("AGENT_DISCOVERY_POLICY") == "utility" else "current",
     )

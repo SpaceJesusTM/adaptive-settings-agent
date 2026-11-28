@@ -6,12 +6,12 @@ import re
 from typing import Optional
 
 DIMENSION_KEYWORDS: dict[str, list[str]] = {
-    "performance": ["fps", "frame rate", "framerate", "frames", "frame drop", "stutter", "choppy", "smooth", "smoother",
+    "performance": ["fps", "frame rate", "framerate", "steadier frame rate", "frames", "frame drop", "stutter", "choppy", "smooth", "smoother",
                     "performance", "lag spike", "low-end", "laptop", "drops", "dips", "runs badly", "slow pc"],
     "input_latency": ["input lag", "input delay", "latency", "lower latency", "delay", "responsive", "responsiveness", "low lag",
                       "reaction", "competitive edge"],
     "visibility": ["see enemies", "see players", "spot enemies", "spot players", "visibility", "visible", "clarity",
-                   "clear view", "clearer", "player visibility", "contrast", "hard to see", "seeing enemies", "clear enemies", "see opponents"],
+                   "clear view", "clearer", "player visibility", "contrast", "hard to see", "seeing enemies", "clear enemies", "see opponents", "pick out opponents", "opponents remain easier to pick out"],
     "visual_quality": ["look better", "looks better", "pretty", "beautiful", "eye candy", "visual quality", "visual fidelity", "visually detailed", "polished", "richer lighting",
                        "graphics quality", "max graphics", "look nice", "look great", "nicer"],
     "audio_awareness": ["footstep", "footsteps", "hear", "hearing", "sound direction", "audio cue", "positional audio",
@@ -115,7 +115,7 @@ def preference_direction_for(text: str, dimension: str) -> str:
         m = re.search(r"(don't|do not) care about ([a-z \-]+)", t)
         if m and dimension in detect_dimensions(m.group(2)):
             return "deprioritize"
-    m = re.search(r"(more than|over|rather than|instead of) ([a-z \-]+)", t)
+    m = re.search(r"(more than|over|rather than|instead of|ahead of) ([a-z \-]+)", t)
     if m and dimension in detect_dimensions(m.group(2)) and dimension not in detect_dimensions(t[: m.start()]):
         return "deprioritize"
     return "prioritize"

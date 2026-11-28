@@ -8,7 +8,7 @@ from .intent import detect_dimensions, detect_explicit_memory, is_goal_statement
 
 _SPLIT = re.compile(
     r"[.!?;]+(?:\s+|$)|,?\s+\b(?:but|also|and)\s+(?="
-    r"(?:tonight|today|for now|for this session|i still (?:need|want)|explain|remember|keep\b|leave\b|don['’]t\b|do not\b))",
+    r"(?:tonight|today|for now|for this session|i still (?:need|want)|explain|tell me|remember|keep\b|leave\b|don['’]t\b|do not\b))",
     re.I,
 )
 _CURRENT = re.compile(r"\b(?:today|tonight|for now|this session|right now)\b", re.I)
@@ -29,12 +29,13 @@ _PROTECT = re.compile(
     r"\b(?:keep|leave|preserve)\s+(?P<keep>[^.!?;]{1,155}?)\s+"
     r"(?:unchanged|as (?:it|they) (?:is|are)|exactly as (?:it|they) (?:is|are)|the same|alone)\b"
     r"|\b(?:i (?:want|need) to keep|keep) (?P<shadows>(?:my |the )?(?:global |dynamic )?shadows)\s+because\b"
-    r"|\b(?:don['’]t|do not|never)\s+(?:change|touch|adjust|modify)\s+(?P<avoid>[^.!?;]{1,110})"
+    r"|\b(?:(?:don['’]t|do not|never)\s+(?:change|touch|adjust|modify)|"
+    r"without\s+(?:changing|touching|adjusting|modifying))\s+(?P<avoid>[^.!?;]{1,110})"
     r"|\b(?P<only>(?:only\s+(?:change|adjust|configure|touch)|configure)\s+(?:the\s+)?"
     r"(?:graphics|video)(?: and frame[- ]pacing)?(?:\s+settings)?)\b",
     re.I,
 )
-_END_PROTECTION = re.compile(r",?\s+(?:and |also )?(?:explain|remember|but|then)\b", re.I)
+_END_PROTECTION = re.compile(r",?\s+(?:and |also )?(?:explain|tell me|remember|but|then)\b", re.I)
 
 
 @dataclass(frozen=True)
@@ -46,14 +47,24 @@ class Objective:
     explicit: bool
 
 
+_QUOTE = re.compile(r""" "[^"\n]+" | “[^”\n]+” | (?<!\w)'[^'\n]+'(?!\w) """, re.X)
+_QUOTED_EXAMPLE = re.compile(r"\b(?:example|hypothetical|quote|someone wrote|someone said|imagine someone|suppose someone|what if someone)\b", re.I)
+
+
+def quoted_as_example(message: str) -> bool:
+    return bool(_QUOTE.search(message) and _QUOTED_EXAMPLE.search(_QUOTE.sub("", message)))
+
+
 def interpret_objective(message: str) -> Objective:
+    if quoted_as_example(message):
+        return Objective("", [], None, False, False)
     clauses = [part.strip(" ,") for part in _SPLIT.split(message.strip()) if part.strip(" ,")]
     clear = bool(_TEMPORARY_END.fullmatch(message))
-    explanation = next((p for p in clauses if re.match(r"^(?:also\s+)?explain\b", p, re.I)), None)
+    explanation = next((p for p in clauses if re.match(r"^(?:also\s+)?(?:explain|tell me what)\b", p, re.I)), None)
     current = [
         p for p in clauses
         if not _NOT_OBJECTIVE.search(p)
-        and not re.match(r"^(?:also\s+)?(?:and\s+)?(?:explain|where|why|what does|what are the downsides)\b", p, re.I)
+        and not re.match(r"^(?:also\s+)?(?:and\s+)?(?:explain|tell me what|where|why|what does|what are the downsides)\b", p, re.I)
         and (not _DURABLE_OR_PREFERENCE.search(p) or _CURRENT.search(p))
     ]
     text = ". ".join(current)
@@ -71,6 +82,8 @@ def protected_setting_ids(store, game: str, message: str) -> set[str]:
     settings = store.registry.settings(game)
     matches = list(_PROTECT.finditer(message))
     protected: set[str] = set()
+    if quoted_as_example(message):
+        return protected
     for match in matches:
         if match["only"]:
             protected.update(s.id for s in settings if s.tabId != "video" or s.controlType == "preset")
@@ -82,6 +95,11 @@ def protected_setting_ids(store, game: str, message: str) -> set[str]:
                 (len(label) >= 4 and re.search(rf"(?<!\w){re.escape(label)}(?!\w)", terms))
                 or ("resolution" in terms and "resolution" in label)
                 or ("aspect ratio" in terms and "aspect ratio" in label)
+                or (re.search(r"anti[ -]?aliasing|\bmsaa\b", terms)
+                    and ("anti-aliasing" in label or s.key == "msaa"))
+                or (re.search(r"\b(?:graphics|video) settings\b", terms) and s.tabId == "video")
+                or (("aim feel" in terms or "feel of aiming" in terms or "aiming feels" in terms)
+                    and ("sensitivity" in label or s.controlType == "keybind" or ".crosshair." in s.id))
                 or ("sensitivity" in terms and "sensitivity" in label)
                 or (re.fullmatch(r"(?:my |the )?(?:global |dynamic )?shadows", terms.strip())
                     and "shadow" in label and ("global" not in terms or "global" in label)
@@ -106,6 +124,12 @@ def prepare_objective(store, profile, conn, game: str, message: str, scope_overr
         has_saved_prefs=bool(profile.applicable_preferences(conn, game)),
         scope_override=scope_override,
     )
+    if quoted_as_example(message):
+        scope_plan = replace(scope_plan, scope="explain_only", auto_stage=False, max_recs=0, inferred_dimensions=[])
+    elif re.search(r"\b(?:inspect|find something|show me where|help me understand)\b", message, re.I) and re.search(
+        r"\b(?:without changing|don't change|do not change)\b", message, re.I
+    ):
+        scope_plan = replace(scope_plan, scope="explain_only", auto_stage=False, max_recs=0)
     if objective.dimensions and any(match["only"] for match in _PROTECT.finditer(message)):
         scope_plan = replace(scope_plan, inferred_dimensions=objective.dimensions)
     # A fresh task starts from applicable preferences. The preceding objective remains active
@@ -124,8 +148,14 @@ def prepare_objective(store, profile, conn, game: str, message: str, scope_overr
 def explicit_memory_clauses(message: str, game: str) -> list[dict]:
     """Persist only values and preferences that can be grounded directly in the user's words."""
     actions = {}
+    if quoted_as_example(message):
+        return []
     for clause in _SPLIT.split(message.replace("’", "'")):
         clause = re.sub(r"^\s*(?:and |also )+", "", clause, flags=re.I)
+        leading_scope = re.match(r"^for (valorant|cs2),\s*(.*)", clause, re.I)
+        evidence_clause = clause
+        if leading_scope:
+            clause = f"{leading_scope[2]} in {leading_scope[1]}"
         # A quoted or embedded request is insufficient evidence to save anything.
         if not re.match(r"^\s*(?:please\s+)?(?:remember|don['’]t forget|from now on|i always|always)\b", clause, re.I):
             continue
@@ -164,6 +194,7 @@ def explicit_memory_clauses(message: str, game: str) -> list[dict]:
                 continue
             if action["kind"] == "preference":
                 action["appliesToGame"] = named_scope[0].lower() if named_scope else None
+            action["quote"] = evidence_clause.strip()[:180]
             key = (action.get("dimension") or action.get("factKey"), action.get("appliesToGame"), action["game"], action["scope"])
             actions[key] = action
     return list(actions.values())[:3]

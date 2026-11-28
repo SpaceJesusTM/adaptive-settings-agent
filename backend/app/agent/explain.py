@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import re
 
+from ..domain.db import loads
+from ..domain.values import display_value
 from .schemas import AssistantDraft, DraftExplanation
 
-_ASKING = re.compile(r"^\s*(?:(?:please|also)\s+)*(?:what\b|how\b|explain\b|compare\b|is\b|(?:can|could) you (?:explain|tell me))", re.I)
+_ASKING = re.compile(r"^\s*(?:(?:please|also)\s+)*(?:what\b|how\b|explain\b|compare\b|is\b|are\b|tell me\b|(?:can|could) you (?:explain|tell me))", re.I)
 
 
 def _words(text: str) -> str:
@@ -42,7 +44,8 @@ def comparison_draft(store, game: str, message: str) -> AssistantDraft | None:
                   "times the display can update per second. A 240 Hz monitor can refresh 240 times per second. "
                   "The frame rate the game produces still depends on the scene, hardware and settings.",
         )
-    if game == "cs2" and "ambient occlusion" in text and ("cast shadow" in text or "dynamic shadow" in text):
+    if game == "cs2" and "ambient occlusion" in text and ("cast shadow" in text or "dynamic shadow" in text
+                                                          or ("shadow" in text and "player" in text)):
         setting_ids = ["cs2.video.ambient_occlusion", "cs2.video.dynamic_shadows"]
         summary = ("Ambient occlusion adds shading near contacts and in crevices, helping surfaces look less flat. "
                    "Dynamic Shadows determines which light sources make moving objects cast shadows. "
@@ -68,3 +71,33 @@ def comparison_draft(store, game: str, message: str) -> AssistantDraft | None:
     ]
     return AssistantDraft(intent="explain", reply=summary, explanations=explanations,
                           navigate_to=explanations[0].setting_id if explanations else None)
+
+
+def pending_status_draft(store, game: str, message: str) -> AssistantDraft | None:
+    if not re.match(r"^\s*(?:did i|is|are|what is|has)\b", message, re.I):
+        return None
+    if not re.search(r"\b(?:staged|pending|review tray|waiting in|already applied)\b", message, re.I):
+        return None
+    targets = named_controls(store, game, message)
+    if len(targets) != 1:
+        return None
+    setting = targets[0]
+    conn = store.connect()
+    try:
+        current = display_value(setting, store.flat_values(conn, game).get(setting.id))
+        rows = conn.execute(
+            "SELECT i.proposed_value_json, i.edited_value_json FROM proposal_items i JOIN proposals p ON p.id = i.proposal_id "
+            "WHERE p.game = ? AND p.status = 'pending' AND i.status = 'pending' AND i.setting_id = ?",
+            (game, setting.id),
+        ).fetchall()
+    finally:
+        conn.close()
+    targets = list(dict.fromkeys(
+        display_value(setting, loads(row["edited_value_json"] or row["proposed_value_json"])) for row in rows
+    ))
+    reply = f"The current value for {setting.exactLabel} is {current}. "
+    if targets:
+        reply += f"The review tray shows {', '.join(targets)} as pending. Apply commits a selected proposal."
+    else:
+        reply += "There is no pending proposal for this setting."
+    return AssistantDraft(intent="explain", reply=reply, navigate_to=setting.id)

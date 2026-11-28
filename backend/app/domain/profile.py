@@ -256,7 +256,12 @@ class ProfileService:
         prefs = self.applicable_preferences(conn, game)
         ctx = self.active_context(conn, game)
         return {
+            "sessionId": self.store.session(conn)["sessionId"],
+            "condition": self.store.session(conn)["condition"],
+            "hardware": self.store.hardware(conn),
+            "personalFactIds": sorted(f["id"] for f in self.personal_facts(conn)),
             "goalText": goals[0]["text"] if goals else None,
+            "protectedSettingIds": list(goals[0]["protectedSettingIds"]) if goals else [],
             "goalDimensions": list(goals[0]["dimensions"]) if goals else [],
             "preferences": [
                 {"id": p["id"], "dimension": p["dimension"], "direction": p["direction"], "scope": p["scope"]}

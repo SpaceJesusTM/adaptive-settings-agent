@@ -21,15 +21,20 @@ _ALIASES = {
         "horizontal hud edge": "cs2.video.hud_edge_x",
     },
 }
-_COMMAND = re.compile(r"^(?:please\s+)?(?:set|change|adjust|switch)\s+(.+?)\s+to\s+(.+)$", re.I)
+_COMMAND = re.compile(r"^(?:please\s+)?(?:set|change|adjust|switch|put)\s+(.+?)\s+(?:to|at)\s+(.+)$", re.I)
 _TOGGLE = re.compile(r"^(?:please\s+)?(enable|disable|turn on|turn off)\s+(.+)$", re.I)
 _RESTORE = re.compile(
     r"^(?:please\s+)?restore\s+(?:the |my )?(.+?)\s+to\s+(?:what it was before|its previous value)"
     r"(?:\s+(?:those|the|that|my)\s+changes?)?(?:[, ]+(?:but\s+)?keep everything else(?: unchanged)?)?$",
     re.I,
 )
-_TEMPORAL_SUFFIX = re.compile(
-    r"\s+(?:for\s+)?(?:just\s+)?(?:tonight|today|this session|for now|right now)$", re.I,
+_TEMPORAL = r"(?:tonight|today|this (?:session|evening|match)|now|right now)"
+_TEMPORAL_PREFIX = re.compile(rf"^(?:just\s+)?(?:for\s+)?{_TEMPORAL}(?:\s+only)?[,]\s*", re.I)
+_TEMPORAL_SUFFIX = re.compile(rf"\s+(?:just\s+)?(?:for\s+)?{_TEMPORAL}(?:\s+only)?$", re.I)
+_POLITE = re.compile(r"^(?:could|can|would) you\s+", re.I)
+_RESTORE_INFORMAL = re.compile(
+    r"^put\s+(.+?)\s+back\s+(?:to its previous value|where it was before(?: i touched it| those (?:edits|changes))?)"
+    r"(?:[.?!, ]+keep (?:the other (?:edit|change)|everything else)(?: unchanged)?)?$", re.I,
 )
 _SPLIT = re.compile(r"\s*;\s*|(?:[,.]\s+|(?:,?\s+)and\s+)(?=(?:please\s+)?(?:set|change|adjust|switch|enable|disable|turn on|turn off)\b)", re.I)
 
@@ -57,8 +62,8 @@ def _previous_value(store, conn, game: str, setting, current):
 
 def exact_draft(store, game: str, message: str) -> AssistantDraft | None:
     """Only claim the turn when every clause identifies a unique setting and literal value."""
-    text = message.strip().rstrip(".!")
-    restore = _RESTORE.fullmatch(text)
+    text = _POLITE.sub("", _TEMPORAL_PREFIX.sub("", message.strip().rstrip(".!?")))
+    restore = _RESTORE.fullmatch(text) or _RESTORE_INFORMAL.fullmatch(text)
     requested = {}
     if restore:
         setting = _setting(store, game, restore[1])
@@ -76,6 +81,7 @@ def exact_draft(store, game: str, message: str) -> AssistantDraft | None:
             if setting is None or setting.id in requested:
                 return None
             raw = _TEMPORAL_SUFFIX.sub("", command[2]) if command else toggle[1].lower()
+            raw = re.sub(r"(?<=\d)\s+percent$", "%", raw, flags=re.I)
             requested[setting.id] = (setting, raw, toggle is not None)
 
     recs = []

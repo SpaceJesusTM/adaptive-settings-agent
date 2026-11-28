@@ -171,6 +171,49 @@ def detect_fact_discrepancies(store, profile, conn: sqlite3.Connection) -> list[
     return discrepancies
 
 
+def longitudinal_signals(store, profile, conn: sqlite3.Connection, game: str) -> list[dict[str, Any]]:
+    """Look for repeated choices that still explain the current configuration."""
+    rows = conn.execute(
+        "SELECT e.setting_id, e.old_value_json, e.new_value_json, b.session_id, b.id AS batch_id "
+        "FROM change_events e JOIN change_batches b ON b.id = e.batch_id "
+        "JOIN setting_values v ON v.game = e.game AND v.setting_id = e.setting_id AND v.revision = e.revision_after "
+        "WHERE e.game = ? AND b.source IN ('manual', 'manual_batch') AND b.undone_by_batch_id IS NULL "
+        "ORDER BY b.created_at DESC, b.rowid DESC LIMIT 100",
+        (game,),
+    ).fetchall()
+    explicit = {p["dimension"] for p in profile.applicable_preferences(conn, game)}
+    supporting: dict[str, list[dict[str, Any]]] = {}
+    contrary: set[str] = set()
+    for row in rows:
+        setting = store.registry.setting(game, row["setting_id"])
+        if setting is None:
+            continue
+        old, new = loads(row["old_value_json"]), loads(row["new_value_json"])
+        for hint in setting.goalHints:
+            was = any(values_equal(old, value) for value in hint.prefer)
+            is_now = any(values_equal(new, value) for value in hint.prefer)
+            if was and not is_now:
+                contrary.add(hint.dimension)
+            elif is_now and not was:
+                supporting.setdefault(hint.dimension, []).append({
+                    "settingId": setting.id, "label": setting.exactLabel, "sessionId": row["session_id"],
+                    "batchId": row["batch_id"], "value": display_value(setting, new),
+                })
+    output = []
+    for dim, evidence in supporting.items():
+        settings = {e["settingId"] for e in evidence}
+        sessions = {e["sessionId"] for e in evidence if e["sessionId"]}
+        if dim in explicit or dim in contrary or len(settings) < 2 or len(sessions) < 2:
+            continue
+        changes = ", ".join(f"{e['label']} ({e['value']})" for e in evidence[:3])
+        output.append({
+            "dimension": dim, "dimensionLabel": DIMENSION_LABELS[dim], "game": game, "tentative": True,
+            "explanation": f"Across {len(sessions)} sessions, you manually chose {changes}. These choices can support {DIMENSION_LABELS[dim]}.",
+            "evidenceSettingIds": sorted(settings), "sessionCount": len(sessions),
+        })
+    return sorted(output, key=lambda item: (-item["sessionCount"], -len(item["evidenceSettingIds"]), item["dimension"]))
+
+
 def build_observed_summary(store, profile, conn: sqlite3.Connection, current_game: str) -> dict[str, Any]:
     """Build a concise, epistemically honest 'What I've noticed' snapshot for UI and model context."""
     other_game = "valorant" if current_game == "cs2" else "cs2"
@@ -195,7 +238,6 @@ def build_observed_summary(store, profile, conn: sqlite3.Connection, current_gam
     ).fetchall()
 
     recent_actions: list[dict[str, Any]] = []
-    dim_manual_hits: dict[str, list[str]] = {}
     for b in batches:
         evs = conn.execute(
             "SELECT setting_id, new_value_json FROM change_events WHERE batch_id = ?",
@@ -207,11 +249,6 @@ def build_observed_summary(store, profile, conn: sqlite3.Connection, current_gam
             if not s:
                 continue
             labels.append(s.exactLabel)
-            if b["source"] in ("manual", "manual_batch"):
-                new_val = loads(e["new_value_json"])
-                for h in s.goalHints:
-                    if any(values_equal(new_val, v) for v in h.prefer):
-                        dim_manual_hits.setdefault(h.dimension, []).append(s.exactLabel)
         recent_actions.append({
             "batchId": b["id"],
             "game": b["game"],
@@ -225,22 +262,7 @@ def build_observed_summary(store, profile, conn: sqlite3.Connection, current_gam
             ),
         })
 
-    active_pref_dims = {p["dimension"] for p in profile.preferences(conn)}
-    tentative_signals: list[dict[str, Any]] = []
-    for dim, setting_labels in dim_manual_hits.items():
-        if dim in active_pref_dims:
-            continue
-        uniq = list(dict.fromkeys(setting_labels))
-        if uniq:
-            tentative_signals.append({
-                "dimension": dim,
-                "dimensionLabel": DIMENSION_LABELS.get(dim, dim),
-                "tentative": True,
-                "explanation": (
-                    f"Tentative pattern (not saved as a lasting priority): you manually changed {', '.join(uniq[:2])}, "
-                    f"which often aligns with {DIMENSION_LABELS.get(dim, dim)}."
-                ),
-            })
+    tentative_signals = longitudinal_signals(store, profile, conn, current_game)
 
     discrepancies = detect_fact_discrepancies(store, profile, conn)
     return {

@@ -37,7 +37,7 @@ def build_services(settings: Optional[Settings] = None, *, model_factory: ModelF
         ensure_seeded(store, settings.scenario_dir, settings.backup_dir)
     profile = ProfileService(store)
     proposals = ProposalService(store, profile)
-    relevant_now = RelevantNowService(store, profile)
+    relevant_now = RelevantNowService(store, profile, policy=settings.agent_discovery_policy)
     runner = AgentRunner(store, profile, settings, model_factory=model_factory, proposals=proposals, relevant_now=relevant_now)
     crosshair = CrosshairProfileService(store)
     return Services(settings=settings, registry=registry, store=store, profile=profile, proposals=proposals,

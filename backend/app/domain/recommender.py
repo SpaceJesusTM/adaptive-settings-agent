@@ -17,7 +17,7 @@ from ..catalog.schema import DIMENSION_LABELS, Setting
 from .cross_game import convert_hipfire_sensitivity
 from .db import dumps, loads, new_id, now_iso, write_tx
 from .errors import Invalid
-from .observations import ONBOARDING_OBSERVATION_SPECS, detect_fact_discrepancies, observe_setting
+from .observations import ONBOARDING_OBSERVATION_SPECS, detect_fact_discrepancies, longitudinal_signals, observe_setting
 from .profile import ProfileService
 from .store import Store
 from .values import availability_problem, display_value, values_equal
@@ -700,9 +700,10 @@ def build_onboarding_cards(
 
 
 class RelevantNowService:
-    def __init__(self, store: Store, profile: ProfileService):
+    def __init__(self, store: Store, profile: ProfileService, *, policy: str = "current"):
         self.store = store
         self.profile = profile
+        self.policy = policy
 
     def _state_signature(self, conn: sqlite3.Connection, game: str, weights: dict[str, dict[str, Any]]) -> str:
         ob = self.profile.get_onboarding(conn, game)
@@ -843,6 +844,88 @@ class RelevantNowService:
                 return card
         return None
 
+    def _utility_selection(
+        self, conn: sqlite3.Connection, game: str, weights: dict[str, dict[str, Any]],
+        objectives: list[dict[str, Any]], protected: set[str], candidates: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        # A recorded move or setting link is an exposure signal, not a comprehension measure.
+        seen = {row["setting_id"] for row in conn.execute(
+            "SELECT DISTINCT setting_id FROM change_events WHERE game = ?", (game,),
+        )}
+        for row in conn.execute(
+            "SELECT content_json FROM chat_messages WHERE game = ? AND role = 'assistant' ORDER BY rowid DESC LIMIT 12",
+            (game,),
+        ):
+            response = loads(row["content_json"], {}).get("response") or {}
+            for item in [response.get("navigateTo"), *response.get("explanations", [])]:
+                if item:
+                    seen.add(item["settingId"])
+        pending = {row["setting_id"] for row in conn.execute(
+            "SELECT i.setting_id FROM proposal_items i JOIN proposals p ON p.id = i.proposal_id "
+            "WHERE p.game = ? AND p.status = 'pending' AND i.status = 'pending'", (game,),
+        )}
+        signals = longitudinal_signals(self.store, self.profile, conn, game) if not objectives else []
+        objective = objectives[0] if objectives else None
+        if objective or signals:
+            dimensions = set(objective["dimensions"]) if objective else {signals[0]["dimension"]}
+            values = self.store.flat_values(conn, game)
+            hardware = self.store.hardware(conn)
+            prior_dismissed = {row["setting_id"] for row in conn.execute(
+                "SELECT setting_id FROM dismissals WHERE game = ? AND session_id = ?",
+                (game, self.store.session(conn)["sessionId"]),
+            )}
+            prospects = []
+            for setting in self.store.registry.settings(game):
+                if (setting.id in seen or setting.id in pending or setting.id in prior_dismissed
+                        or not setting.riskOrTradeoffs or availability_problem(self.store.registry, setting, values, hardware)):
+                    continue
+                related = dimensions & (set(setting.goalTags) | {h.dimension for h in setting.goalHints})
+                if not related:
+                    continue
+                dimension = max(sorted(related), key=lambda d: weights.get(d, {}).get("weight", 0))
+                current = values.get(setting.id)
+                reason = objective["text"] if objective else signals[0]["explanation"]
+                card = {
+                    "kind": "inspect", "triggerGroup": "goal_or_preference",
+                    "triggerLabel": "Worth understanding", "settingId": setting.id, "label": setting.exactLabel,
+                    "path": setting.canonicalPath, "targetValue": current, "targetDisplay": "Inspect setting",
+                    "currentValue": current, "currentDisplay": display_value(setting, current),
+                    "dimension": dimension, "dimensionLabel": DIMENSION_LABELS[dimension],
+                    "whatItDoes": setting.description, "whatItDoesSource": setting.descriptionSource,
+                    "why": f"This setting can help you understand a trade-off for {DIMENSION_LABELS[dimension]}.",
+                    "whyOrigin": "goal_hint", "whyBasis": "editorial", "basedOn": [reason],
+                    "tradeoff": setting.riskOrTradeoffs, "verificationStatus": setting.verificationStatus,
+                    "sourceURL": setting.sourceURL, "crossGame": False, "order": setting.order,
+                    "score": 1.8 if objective else 1.25,
+                }
+                specificity = 1 if any(h.dimension in related for h in setting.goalHints) else 0
+                prospects.append((specificity, len(related), int(setting.tabId == "video"), card))
+            if prospects:
+                ranked = sorted(prospects, key=lambda x: (-x[0], -x[1], -x[2], x[3]["order"]))
+                candidates.append(ranked[0][3])
+
+        def utility(card):
+            value = 1.8 if card.get("crossGame") else 0.0
+            value += 0.6 if card["settingId"] not in seen else 0.0
+            value += 0.5 if card.get("triggerGroup") == "followup" else 0.0
+            value += 0.4 if card.get("whyBasis") == "official" else 0.0
+            value += min(2.0, float(card.get("score", 0)))
+            value -= 0.5 if card["kind"] == "change" else 0.0
+            return value
+
+        result = []
+        used = set()
+        for card in sorted(candidates, key=lambda c: (-utility(c), c.get("order", 0))):
+            if card["settingId"] in used or card["settingId"] in pending or utility(card) < 1.7:
+                continue
+            if card["kind"] == "change" and card["settingId"] in protected:
+                continue
+            used.add(card["settingId"])
+            result.append(card)
+            if len(result) == MAX_RELEVANT_NOW:
+                break
+        return result
+
     def _collect_candidates(self, conn: sqlite3.Connection, game: str) -> list[dict[str, Any]]:
         weights = self.profile.dimension_weights(conn, game)
         protected = self.profile.objective_protections(conn, game)
@@ -866,6 +949,8 @@ class RelevantNowService:
         objectives = self.profile.session_goals(conn, game)
         if objectives:
             ob_cards = [c for c in ob_cards if c.get("crossGame") or weights.get(c.get("dimension"), {}).get("weight", 0) > 0]
+        if self.policy == "utility":
+            return self._utility_selection(conn, game, weights, objectives, protected, followup_cards + goal_cards + ob_cards)
         if objectives and not (goal_cards or followup_cards or ob_cards):
             aligned = self._aligned_inspection(conn, game, objectives[0], protected)
             if aligned:

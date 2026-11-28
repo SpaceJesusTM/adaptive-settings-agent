@@ -15,8 +15,8 @@ import httpx
 from ollama import ResponseError
 
 from .exact import exact_draft
-from .explain import comparison_draft
-from .objective import interpret_objective, preference_removal, protected_setting_ids
+from .explain import comparison_draft, pending_status_draft
+from .objective import interpret_objective, preference_removal, protected_setting_ids, quoted_as_example
 from .schemas import AssistantDraft
 from .scope import ScopePlan
 from ..catalog.schema import DIMENSION_LABELS
@@ -33,6 +33,7 @@ from .graph import InvalidModelToolCall, build_turn_graph, make_chat_models
 from .health import describe_status, model_label, probe_ollama
 from .intent import is_speculative
 from .validate import validate_draft
+from .telemetry import TurnTelemetry
 
 ModelFactory = Callable[[Settings], tuple[Any, Any]]
 
@@ -45,6 +46,9 @@ class RunHandle:
     steps: list[dict[str, Any]] = field(default_factory=list)
     task: Optional[asyncio.Task] = None
     started: float = field(default_factory=time.perf_counter)
+    telemetry: TurnTelemetry = field(default_factory=TurnTelemetry)
+    starting_revisions: dict[str, int] | None = None
+    starting_context: dict[str, Any] | None = None
 
     def step(self, label: str) -> None:
         self.steps.append({"label": label, "at": now_iso()})
@@ -65,7 +69,7 @@ class AgentRunner:
         self.settings = settings
         self.model_factory = model_factory
         self.proposals = proposals or ProposalService(store, profile)
-        self.relevant_now = relevant_now or RelevantNowService(store, profile)
+        self.relevant_now = relevant_now or RelevantNowService(store, profile, policy=settings.agent_discovery_policy)
         self._active: dict[str, RunHandle] = {}
         self._game_run: dict[str, str] = {}
         self._lock = asyncio.Lock()
@@ -237,8 +241,8 @@ class AgentRunner:
         scope_override: Optional[str] = None,
     ) -> None:
         game = handle.game
-        trace: list[dict[str, Any]] = []
-        model_calls: list[dict[str, Any]] = []
+        trace = handle.telemetry.tools
+        model_calls = handle.telemetry.calls
         provenance: dict[str, Any]
         validated: Optional[dict[str, Any]] = None
         fallback_reason: Optional[str] = None
@@ -250,12 +254,18 @@ class AgentRunner:
             finally:
                 conn.close()
             objective = interpret_objective(message)
-            if objective.clear:
+            if quoted_as_example(message):
+                direct_draft = AssistantDraft(intent="other", reply="This reads as a quoted example. Tell me which settings goal you want to try.")
+            elif objective.clear:
                 direct_draft = AssistantDraft(intent="other", reply="I cleared the current goal. Your saved preferences still apply.")
             elif preference_removal(message):
                 direct_draft = AssistantDraft(intent="preference", reply="I checked System Understanding for that preference.")
             else:
-                direct_draft = exact_draft(self.store, game, message) or comparison_draft(self.store, game, message)
+                direct_draft = (
+                    exact_draft(self.store, game, message)
+                    or pending_status_draft(self.store, game, message)
+                    or comparison_draft(self.store, game, message)
+                )
                 if direct_draft is None and protected_setting_ids(self.store, game, message) and not objective.text:
                     if not objective.explanation:
                         direct_draft = AssistantDraft(intent="other", reply="I'll keep those settings unchanged for this objective.")
@@ -288,6 +298,14 @@ class AgentRunner:
             else:
                 handle.step(f"Asking local model {model_label(probe)}")
                 try:
+                    conn = self.store.connect()
+                    try:
+                        handle.starting_revisions = {
+                            sid: value["revision"] for sid, value in self.store.values(conn, game).items()
+                        }
+                        handle.starting_context = self.profile.snapshot_context(conn, game)
+                    finally:
+                        conn.close()
                     plan_model, compose_model = self.model_factory(self.settings)
                     graph = build_turn_graph(
                         store=self.store,
@@ -298,6 +316,8 @@ class AgentRunner:
                         progress=handle.step,
                         deadline_s=self.settings.agent_deadline_s,
                         fast_path=self.settings.agent_fast_path,
+                        telemetry=handle.telemetry,
+                        reasoning_mode=self.settings.agent_reasoning_mode,
                     )
                     final = await asyncio.wait_for(
                         graph.ainvoke(
@@ -457,6 +477,25 @@ class AgentRunner:
                 is_adaptive = sess.get("condition") == "adaptive" and bool(sess.get("adaptationEnabled", True))
                 if result is not None:
                     result = {**result, "provenance": {**(provenance or {}), "latencyMs": latency}}
+                    if provenance and provenance.get("source") == "ai" and handle.starting_context is not None:
+                        now_context = self.profile.snapshot_context(conn, handle.game)
+                        if handle.starting_context != now_context:
+                            result.update(recommendations=[], preferenceSuggestions=[], explicitMemoryActions=[],
+                                          goalChanged=False, goalDimensions=[], navigateTo=None,
+                                          reply="Your goal or priorities changed while I was working. Ask again to review suggestions against the new context.")
+                            result["validationNotes"].append("Discarded advice calculated against an earlier objective.")
+                            message = None
+                        elif handle.starting_revisions is not None:
+                            values = self.store.values(conn, handle.game)
+                            recs = result.get("recommendations", [])
+                            current = [r for r in recs if handle.starting_revisions.get(r["settingId"]) ==
+                                       values.get(r["settingId"], {}).get("revision")]
+                            if len(current) != len(recs):
+                                result["recommendations"] = current
+                                result["reply"] = "Some settings changed while I was working. Review the remaining suggestions against their current values."
+                                result["validationNotes"].append("Discarded advice for settings edited during inference.")
+                                if result.get("plan", {}).get("coverage"):
+                                    result["plan"]["coverage"]["proposedCount"] = len(current)
                     msg_text = (message or "").strip()
                     speculative = bool(msg_text and is_speculative(msg_text))
                     objective = interpret_objective(msg_text)
@@ -478,7 +517,7 @@ class AgentRunner:
                         sync_trigger = "goal_change"
                     elif result.get("goalChanged") and result.get("goalDimensions"):
                         goal_id = self.profile.set_session_goal(
-                            conn, handle.game, objective.text, result["goalDimensions"], "chat",
+                            conn, handle.game, result.get("objectiveText") or objective.text, result["goalDimensions"], "chat",
                             set(result.get("protectedSettingIds") or ()),
                         )
                         if goal_id:
@@ -624,6 +663,7 @@ class AgentRunner:
                     "filtered": (result or {}).get("filtered", []),
                     "notes": (result or {}).get("validationNotes", []),
                     "modelCalls": model_calls,
+                    "phaseTimingsMs": handle.telemetry.phases,
                 }
                 conn.execute(
                     "UPDATE agent_runs SET status = ?, steps_json = ?, tool_calls_json = ?, validation_json = ?, result_json = ?, "

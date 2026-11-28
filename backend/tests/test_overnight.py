@@ -22,7 +22,7 @@ def test_new_protection_blocks_apply_atomically_and_allows_manual_edit(services,
     assert client.get(path).json()["items"][0]["protectedReason"]
     response = client.post(f"{path}/apply", json={"itemIds": ids})
     assert response.status_code == 409
-    assert response.json()["error"]["code"] == "protected_by_objective"
+    assert response.json()["error"] == "protected_by_objective"
     values = client.get("/api/games/valorant/state").json()["values"]
     assert values["val.video.vsync"]["value"] == values["val.video.bloom"]["value"] == "on"
     assert client.post(f"{path}/apply", json={"itemIds": ids[1:]}).status_code == 200

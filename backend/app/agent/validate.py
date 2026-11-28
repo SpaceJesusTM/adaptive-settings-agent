@@ -15,7 +15,7 @@ from ..domain.store import Store
 from ..domain.values import ValueError_, availability_problem, display_value, normalize_value, values_equal
 from .intent import classify, is_goal_statement, is_speculative
 from .schemas import AssistantDraft
-from .objective import explicit_memory_clauses, interpret_objective, protected_setting_ids
+from .objective import Objective, explicit_memory_clauses, interpret_objective, protected_setting_ids, quoted_as_example
 from .explain import explanation_target, named_controls
 
 MAX_RECOMMENDATIONS = 3
@@ -85,6 +85,8 @@ def validate_draft(
     message: str = "",
     inherit_objective: bool = True,
     focused_setting_id: Optional[str] = None,
+    objective_override: Objective | None = None,
+    extra_protected: set[str] | None = None,
 ) -> dict[str, Any]:
     conn = store.connect()
     try:
@@ -106,8 +108,8 @@ def validate_draft(
     # Ground "based on ..." in the user's actual stored goals/preferences rather than trusting model text.
     from ..domain.profile import ProfileService  # local import avoids a cycle at module load
 
-    objective = interpret_objective(message)
-    protected = protected_setting_ids(store, game, message)
+    objective = objective_override or interpret_objective(message)
+    protected = protected_setting_ids(store, game, message) | (extra_protected or set())
     conn = store.connect()
     try:
         profile = ProfileService(store)
@@ -231,7 +233,7 @@ def validate_draft(
             navigate = {"settingId": setting.id, "label": setting.exactLabel, "path": setting.canonicalPath,
                         "tabId": setting.tabId, "subtabId": setting.subtabId}
 
-    speculative = bool(message and is_speculative(message))
+    speculative = bool(message and (is_speculative(message) or quoted_as_example(message)))
     neutral_explain = bool(
         draft.intent in ("explain", "navigate")
         or (message and classify(message) in ("explain", "navigate") and not is_goal_statement(message))
@@ -310,6 +312,7 @@ def validate_draft(
         "knownsAndUnknowns": _drop_numeric_claims(_clean(draft.knowns_and_unknowns, 450), notes, "the uncertainty note") or None,
         "goalDimensions": valid_goal_dims,
         "goalChanged": goal_changed,
+        "objectiveText": objective.text if goal_changed else None,
         "protectedSettingIds": sorted(protected),
         "recommendations": recs,
         "explanations": explanations,

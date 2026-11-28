@@ -40,8 +40,10 @@ from .prompts import (
 )
 from .schemas import AssistantDraft, BatchDraft, DraftRecommendation
 from .scope import ScopePlan
-from .objective import prepare_objective
-from .tools import MAX_TOOL_RESULT_CHARS, ToolContext, get_current_ui_state, get_user_preferences, langchain_tools, run_tool, search_settings
+from .objective import Objective, objective_takes_precedence, prepare_objective, quoted_as_example
+from .decisions import apply_interpretation, interpret, select_candidates, should_interpret
+from .tools import MAX_TOOL_RESULT_CHARS, ToolContext, langchain_tools, run_tool, search_settings
+from .telemetry import TurnTelemetry
 from .validate import needs_repair, validate_draft
 
 MAX_CALLS_PER_ROUND = 4
@@ -63,6 +65,9 @@ class TurnState(TypedDict, total=False):
     ui_state: dict[str, Any]
     scope_override: Optional[str]
     scope_plan: ScopePlan
+    objective: Objective
+    protected: set[str]
+    clarified: AssistantDraft | None
     weights: dict[str, Any]
     audit: dict[str, Any]
     context: str
@@ -91,17 +96,6 @@ def _to_lc(messages: list[tuple[str, str]]) -> list[BaseMessage]:
     for role, text in messages:
         out.append(SystemMessage(text) if role == "system" else HumanMessage(text))
     return out
-
-
-def _usage(msg: Any) -> dict[str, Any]:
-    meta = getattr(msg, "response_metadata", {}) or {}
-    usage = getattr(msg, "usage_metadata", None) or {}
-    return {
-        "inputTokens": usage.get("input_tokens"),
-        "outputTokens": usage.get("output_tokens"),
-        "evalMs": round(meta.get("eval_duration", 0) / 1e6) if meta.get("eval_duration") else None,
-        "loadMs": round(meta.get("load_duration", 0) / 1e6) if meta.get("load_duration") else None,
-    }
 
 
 def _category_batches(cands: list[dict[str, Any]], max_recs: int) -> list[tuple[str, list[str]]]:
@@ -134,8 +128,12 @@ def build_turn_graph(
     progress: ProgressFn,
     deadline_s: float = 240.0,
     fast_path: bool = True,
+    telemetry: TurnTelemetry | None = None,
+    reasoning_mode: str = "legacy",
 ):
     """`plan_model` must support `.bind_tools`; `compose_model` must support `.with_structured_output`."""
+
+    measured = telemetry or TurnTelemetry()
 
     def ctx_for(state: TurnState) -> ToolContext:
         return ToolContext(store=store, profile=profile, game=state["game"], ui_state=state.get("ui_state") or {})
@@ -144,19 +142,44 @@ def build_turn_graph(
         started_mono = time.perf_counter()
         progress("Reading your current settings and preferences")
         ctx = ctx_for(state)
-        trace = []
-        t0 = time.perf_counter()
-        get_current_ui_state(ctx)
-        trace.append({"tool": "get_current_ui_state", "by": "workflow", "ok": True, "ms": round((time.perf_counter() - t0) * 1000)})
-        t0 = time.perf_counter()
-        get_user_preferences(ctx)
-        trace.append({"tool": "get_user_preferences", "by": "workflow", "ok": True, "ms": round((time.perf_counter() - t0) * 1000)})
+        trace = measured.tools
 
         conn = store.connect()
         try:
             objective, scope_plan, weights, protected = prepare_objective(
                 store, profile, conn, state["game"], state["message"], state.get("scope_override"),
             )
+        finally:
+            conn.close()
+        clarified = None
+        if quoted_as_example(state["message"]):
+            clarified = AssistantDraft(intent="other", reply="This reads as a quoted example. Tell me which settings goal you want to try.")
+        elif reasoning_mode == "semantic" and should_interpret(store, state["game"], state["message"], objective, scope_plan):
+            progress("Interpreting your goal and constraints")
+            semantic_started = time.perf_counter()
+            try:
+                parsed = await interpret(compose_model, measured, state["game"], state["message"],
+                                         recent_conversation(store, state["game"], exchanges=1),
+                                         min(45.0, deadline_s * 0.36))
+            except Exception:
+                parsed = None
+            if parsed is not None:
+                before = objective
+                objective, scope_plan, protected, clarified = apply_interpretation(
+                    store, state["game"], state["message"], objective, scope_plan, protected, parsed,
+                )
+                if objective != before and objective.explicit:
+                    conn = store.connect()
+                    try:
+                        weights = profile.dimension_weights(conn, state["game"], include_objective=False)
+                        profile.prioritize_objective(weights, scope_plan.inferred_dimensions, objective.text,
+                                                     takes_precedence=objective_takes_precedence(objective.text))
+                        protected.update(profile.objective_protections(conn, state["game"]))
+                    finally:
+                        conn.close()
+            measured.phase("interpretation", semantic_started)
+        conn = store.connect()
+        try:
             audit = build_coverage_audit(
                 store,
                 profile,
@@ -215,7 +238,7 @@ def build_turn_graph(
             candidates = list(dict.fromkeys(audit_ids + [h["id"] for h in searched]))[: max(10, scope_plan.max_recs + 4)]
 
         needs_plan = False
-        if max_tool_rounds > 0:
+        if max_tool_rounds > 0 and clarified is None:
             if not fast_path:
                 needs_plan = True
             elif _HISTORY_QUERY_RE.search(state["message"]):
@@ -246,8 +269,14 @@ def build_turn_graph(
             context += "\nKEEP UNCHANGED (explicit user constraint): " + ", ".join(labels)
         if objective.explanation:
             context += "\nAlso address this explanation independently: " + objective.explanation[:200]
+        if reasoning_mode == "semantic" and objective.explicit:
+            context += "\nCurrent objective grounded in the current request: " + objective.text[:250]
+        measured.phase("prepare", started_mono)
         return {
             "scope_plan": scope_plan,
+            "objective": objective,
+            "protected": protected,
+            "clarified": clarified,
             "weights": weights,
             "audit": audit,
             "context": context,
@@ -256,7 +285,7 @@ def build_turn_graph(
             "trace": trace,
             "tool_rounds": 0,
             "observations": [],
-            "model_calls": [],
+            "model_calls": measured.calls,
             "repairs": 0,
             "batch_partial": False,
             "batches_completed": 0,
@@ -269,18 +298,12 @@ def build_turn_graph(
     async def plan(state: TurnState) -> dict[str, Any]:
         progress("Checking whether more setting details are needed")
         bound = plan_model.bind_tools(langchain_tools())
-        t0 = time.perf_counter()
-        ai: AIMessage = await bound.ainvoke(state["plan_history"])
+        ai: AIMessage = await measured.invoke("plan", bound, state["plan_history"])
         if ai.invalid_tool_calls:
             raise InvalidModelToolCall()
         calls = list(getattr(ai, "tool_calls", []) or [])[:MAX_CALLS_PER_ROUND]
-        mc = state.get("model_calls", []) + [{
-            "step": "plan",
-            "ms": round((time.perf_counter() - t0) * 1000),
-            "toolCalls": [c.get("name") for c in calls],
-            **_usage(ai),
-        }]
-        return {"plan_history": state["plan_history"] + [ai], "pending_calls": calls, "model_calls": mc}
+        measured.calls[-1]["toolCalls"] = [c.get("name") for c in calls]
+        return {"plan_history": state["plan_history"] + [ai], "pending_calls": calls, "model_calls": measured.calls}
 
     def after_plan(state: TurnState) -> str:
         if state.get("pending_calls") and state.get("tool_rounds", 0) < max_tool_rounds:
@@ -291,7 +314,7 @@ def build_turn_graph(
         ctx = ctx_for(state)
         history = list(state["plan_history"])
         observations = list(state.get("observations", []))
-        trace = list(state.get("trace", []))
+        trace = measured.tools
         for call in state.get("pending_calls", []):
             name, args = call.get("name", ""), call.get("args", {}) or {}
             progress(f"Looking up: {name}")
@@ -323,7 +346,20 @@ def build_turn_graph(
         structured_batch = compose_model.with_structured_output(BatchDraft, method="json_schema", include_raw=True)
         scope_plan: ScopePlan = state["scope_plan"]
         audit = state["audit"]
-        mc = list(state.get("model_calls", []))
+        mc = measured.calls
+        if state.get("clarified") is not None:
+            return {"draft": state["clarified"], "model_calls": mc, "batches_completed": 0, "batches_total": 0}
+        if (reasoning_mode in {"compact", "semantic"} and scope_plan.scope != "explain_only"
+                and len(audit["candidates"]) >= 5 and not scope_plan.single_setting_hint and not state.get("repair_feedback")):
+            rows = audit["candidates"][: min(scope_plan.max_recs, 22)]
+            decision = await select_candidates(
+                compose_model, measured, game=state["game"], message=state["message"],
+                objective=state["objective"].text, candidates=rows, maximum=scope_plan.max_recs,
+            )
+            if decision is not None:
+                limited = len(rows) < min(scope_plan.max_recs, len(audit["candidates"]))
+                return {"draft": decision, "model_calls": mc, "batch_partial": limited,
+                        "batches_completed": 1, "batches_total": 2 if limited else 1}
 
         # Use bounded category-packed passes when a broad/full setup has more than BATCH_SIZE candidates so local Gemma 4
         # stays accurate and well within timeout limits.
@@ -344,7 +380,9 @@ def build_turn_graph(
             started_mono = state.get("started_mono") or time.perf_counter()
 
             for idx, (cat_label, chunk_ids) in enumerate(batches):
-                if idx > 0 and (time.perf_counter() - started_mono) > max(20.0, deadline_s - 15.0):
+                reserve = min(1.0, deadline_s * 0.1)
+                remaining = deadline_s - (time.perf_counter() - started_mono) - reserve
+                if remaining <= 0:
                     partial = True
                     break
                 progress(f"Reviewing {cat_label} settings ({idx + 1}/{len(batches)})")
@@ -376,9 +414,8 @@ def build_turn_graph(
                         scope_instruction=inst,
                     ))
                     invoker = structured_batch
-                t0 = time.perf_counter()
                 try:
-                    out = await invoker.ainvoke(msgs)
+                    out = await measured.invoke(f"compose:{cat_label}", invoker, msgs, timeout=remaining)
                 except Exception:
                     if idx == 0:
                         raise
@@ -386,14 +423,6 @@ def build_turn_graph(
                     break
                 raw = out.get("raw") if isinstance(out, dict) else None
                 parsed = out.get("parsed") if isinstance(out, dict) else out
-                err = out.get("parsing_error") if isinstance(out, dict) else None
-                mc.append({
-                    "step": f"compose:{cat_label}",
-                    "ms": round((time.perf_counter() - t0) * 1000),
-                    "parsed": parsed is not None,
-                    "parseError": str(err)[:300] if err else None,
-                    **(_usage(raw) if raw is not None else {}),
-                })
                 raw_text = getattr(raw, "content", None) if raw is not None else None
                 if isinstance(raw_text, str):
                     raw_samples.append(raw_text[:800])
@@ -454,18 +483,9 @@ def build_turn_graph(
             state.get("repair_feedback"),
             scope_instruction=inst,
         ))
-        t0 = time.perf_counter()
-        out = await structured.ainvoke(msgs)
+        out = await measured.invoke("repair" if state.get("repair_feedback") else "compose", structured, msgs)
         raw = out.get("raw") if isinstance(out, dict) else None
         parsed = out.get("parsed") if isinstance(out, dict) else out
-        err = out.get("parsing_error") if isinstance(out, dict) else None
-        mc.append({
-            "step": "compose" if not state.get("repair_feedback") else "repair",
-            "ms": round((time.perf_counter() - t0) * 1000),
-            "parsed": parsed is not None,
-            "parseError": str(err)[:300] if err else None,
-            **(_usage(raw) if raw is not None else {}),
-        })
         raw_text = getattr(raw, "content", None) if raw is not None else None
         return {
             "draft": parsed if isinstance(parsed, AssistantDraft) else None,
@@ -477,6 +497,7 @@ def build_turn_graph(
         }
 
     async def validate(state: TurnState) -> dict[str, Any]:
+        started = time.perf_counter()
         progress("Checking suggestions against the catalogue, locks and allowed values")
         draft = state.get("draft")
         scope_plan: ScopePlan = state["scope_plan"]
@@ -491,16 +512,25 @@ def build_turn_graph(
                 scope_plan=scope_plan,
                 message=state["message"],
                 focused_setting_id=(state.get("ui_state") or {}).get("focusedSettingId"),
+                objective_override=state.get("objective"),
+                extra_protected=state.get("protected"),
             )
             if draft is not None
             else None
         )
         feedback = needs_repair(draft, validated, state["message"], scope_plan=scope_plan, audit=audit)
+        if state.get("clarified") is not None:
+            feedback = None
         if validated is not None:
             partial = bool(state.get("batch_partial", False))
             completed = int(state.get("batches_completed", 1))
             total = int(state.get("batches_total", 1))
             if partial:
+                feedback = None
+                validated["reply"] = (
+                    f"Partial review. Covered {completed} of {total} settings groups. "
+                    + validated["reply"]
+                )[:1800]
                 validated["validationNotes"].append(
                     f"Partial coverage: finished {completed} of {total} category batches within the turn deadline."
                 )
@@ -541,6 +571,7 @@ def build_turn_graph(
             }
             if state.get("cross_game_data") and state["cross_game_data"].get("comparisons"):
                 validated["crossGameComparisons"] = state["cross_game_data"]["comparisons"]
+        measured.phase("validate", started)
         return {"validated": validated, "repair_feedback": feedback}
 
     def after_prepare(state: TurnState) -> str:
