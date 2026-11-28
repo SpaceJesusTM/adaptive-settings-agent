@@ -537,10 +537,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     const session = await api.updateSession({ selectedGame: game });
     syncWorkspaceUrlGame(game);
     set({ session, highlight: null });
+    // The selection is already committed. Publish it before a reload can cancel refresh requests.
+    broadcastSync({ type: "state_changed", game });
     await get().refreshState(game);
     await get().refreshAdaptive(game);
     if (game === "valorant") void get().loadCrosshairProfiles();
-    broadcastSync({ type: "state_changed", game });
   },
 
   setCondition: async (condition) => {
