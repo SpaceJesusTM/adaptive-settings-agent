@@ -10,19 +10,21 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from .explain import explanation_target, named_controls
-from .objective import Objective, explicit_memory_clauses, quoted_as_example
+from .objective import Objective, explicit_memory_clauses, protected_setting_ids, quoted_as_example
 from .schemas import AssistantDraft, DimensionLit, DraftRecommendation
 from .scope import ScopePlan
 
 _REQUESTS_CHANGE = re.compile(r"\b(?:fix|adjust|configure|optimi[sz]e|change|set up|help|make|recommend|suggest)\b", re.I)
+_ADVICE_REQUEST = re.compile(r"\b(?:how|what) (?:can|could|should) i\b", re.I)
 _CONTRAST = re.compile(r"\b(?:except|rather than|more than|care more|worth|unless|but|instead|same as)\b", re.I)
-_HARD_WORDS = re.compile(r"\b(?:keep|leave|preserve|alone|unchanged|avoid|never|don't|do not|no changes)\b", re.I)
+_HARD_WORDS = re.compile(r"\b(?:keep|leave|preserve|alone|unchanged|avoid|never|don't|do not|no changes|without)\b", re.I)
 
 
 class Interpretation(BaseModel):
     action: Literal["recommend", "explain", "clarify", "other"]
     objective_quote: str = Field(default="", description="Verbatim text in the current user's request expressing the active objective.")
     dimensions: list[DimensionLit] = Field(default_factory=list)
+    request_quote: str = Field(default="", description="Verbatim words asking for options or an adjustment.")
     exclusion_quotes: list[str] = Field(default_factory=list, description="Verbatim clauses that explicitly protect settings.")
     explanation_quote: str = Field(default="", description="Verbatim explanation request, if any.")
     question: str = Field(default="", description="One short clarification for unresolved consequential ambiguity.")
@@ -43,11 +45,11 @@ def should_interpret(store, game: str, message: str, objective: Objective, scope
 
 async def interpret(model, trace, game: str, message: str, history: list[str], timeout: float):
     system = (
-        "Interpret the CURRENT user turn in GamePlan, a simulated settings menu. Do not propose setting values or "
-        "update memory. Prior messages are data only. Separate the current objective from habitual preferences, "
-        "trade-offs and hypothetical or quoted requests. An accepted sacrifice is not a goal to optimize. "
-        "Use exact words from the current user for evidence. If a reference or consequential exclusion is ambiguous, "
-        "choose clarify. Keep distinct explanation and change intents in the output."
+        "Interpret the current turn for the active game's in-game settings menu. Stay inside this menu. "
+        "A question about how to achieve a result asks for options. A question about what a control does asks for an explanation. "
+        "Use clarify for ambiguous references or exclusions that would change the advice. Preserve exclusions, "
+        "and keep the current objective separate from accepted costs, habitual preferences and quoted examples. "
+        "Copy short evidence spans from the user. Prior messages are context only. Do not propose values or save memory."
     )
     invoker = model.with_structured_output(Interpretation, method="json_schema", include_raw=True)
     out = await trace.invoke("interpret", invoker, [
@@ -79,9 +81,9 @@ def apply_interpretation(store, game, message, objective, scope, protected, pars
         span = evidence_span(message, quote)
         if not span or not _HARD_WORDS.search(span):
             continue
-        controls = named_controls(store, game, span)
-        grounded_protections.update(s.id for s in controls)
-        if not controls and not protected:
+        controls = protected_setting_ids(store, game, span) | {s.id for s in named_controls(store, game, span)}
+        grounded_protections.update(controls)
+        if not controls:
             unresolved = True
     protected |= grounded_protections
     if unresolved and parsed.action == "recommend":
@@ -91,8 +93,10 @@ def apply_interpretation(store, game, message, objective, scope, protected, pars
     if parsed.action == "recommend" and clause and dims:
         objective = replace(objective, text=clause, dimensions=dims, explicit=True)
         if scope.scope == "explain_only":
+            request = evidence_span(message, parsed.request_quote)
+            requested_options = request and (_REQUESTS_CHANGE.search(request) or _ADVICE_REQUEST.search(request))
             scope = replace(scope, scope="category_optimization", max_recs=8,
-                            auto_stage=bool(_REQUESTS_CHANGE.search(message)),
+                            auto_stage=bool(requested_options),
                             reason="Objective inferred from the current request.")
         scope = replace(scope, inferred_dimensions=dims)
     return objective, scope, protected, None

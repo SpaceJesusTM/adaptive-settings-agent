@@ -246,14 +246,16 @@ def discover_avoid_pending(s):
 
 def discover_contact_shadows(s):
     s.select(CS)
-    s.manual(CS, {"cs2.video.dynamic_shadows": "1", "cs2.video.boost_player_contrast": "1"})
+    s.manual(CS, {"cs2.video.dynamic_shadows": "0", "cs2.video.boost_player_contrast": "0"})
+    changed = {"cs2.video.dynamic_shadows": "1", "cs2.video.boost_player_contrast": "1"}
+    s.manual(CS, changed)
     result = s.turn(CS, "I want visibility in dark areas, but don't change any video settings for me. "
                        "Help me find something unfamiliar worth understanding.")
     cards = audit.active_cards(s.discover(CS))
     # Independently chosen discovery families for this objective. Exact order within them is free.
     relevant = {"cs2.video.dynamic_shadows", "cs2.video.boost_player_contrast",
                 "cs2.video.ambient_occlusion", "cs2.video.global_shadow_quality"}
-    s.check("discovery_teaches_without_editing_protected_video", any(c["kind"] == "inspect" and c["settingId"] in relevant for c in cards)
+    s.check("discovery_teaches_without_editing_protected_video", any(c["kind"] == "inspect" and c["settingId"] in relevant - changed.keys() for c in cards)
             and not any(c["kind"] == "change" and c["settingId"].startswith("cs2.video.") for c in cards)
             and not result.get("stagedProposalId"), audit.card_items(cards))
 
@@ -334,7 +336,7 @@ def main():
         "agent_reasoning_mode", "agent_pipeline", "agent_discovery_policy",
     )
     results = {
-        "benchmark": "overnight-v1",
+        "benchmark": "overnight-v2",
         "revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip(),
         "dirtyTrackedFiles": bool(subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=no"], cwd=repo, text=True)),
         "mode": args.mode,
