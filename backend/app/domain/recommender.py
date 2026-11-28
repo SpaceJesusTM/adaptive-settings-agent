@@ -907,7 +907,7 @@ class RelevantNowService:
         def utility(card):
             value = 1.8 if card.get("crossGame") else 0.0
             value += 0.6 if card["settingId"] not in seen else 0.0
-            value += 0.5 if card.get("triggerGroup") == "followup" else 0.0
+            value += {"context_event": 1.0, "followup": 0.5}.get(card.get("triggerGroup"), 0.0)
             value += 0.4 if card.get("whyBasis") == "official" else 0.0
             value += min(2.0, float(card.get("score", 0)))
             value -= 0.5 if card["kind"] == "change" else 0.0

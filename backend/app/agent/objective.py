@@ -11,6 +11,11 @@ _SPLIT = re.compile(
     r"(?:tonight|today|for now|for this session|i still (?:need|want)|explain|tell me|remember|keep\b|leave\b|don['’]t\b|do not\b))",
     re.I,
 )
+_ACCEPTED_COST = re.compile(
+    r"\b(?:(?:i (?:can|could|am willing to)|i['’]m willing to)\s+)?"
+    r"(?:give up|sacrifice|trade|lose|accept)\s+[^.!?;]{1,90}?\s+(?:if|for|to)\s+",
+    re.I,
+)
 _CURRENT = re.compile(r"\b(?:today|tonight|for now|this session|right now)\b", re.I)
 _DURABLE_OR_PREFERENCE = re.compile(
     r"^\s*(?:also\s+)?(?:remember|from now on|don't forget|keep in mind|"
@@ -68,8 +73,14 @@ def interpret_objective(message: str) -> Objective:
         and (not _DURABLE_OR_PREFERENCE.search(p) or _CURRENT.search(p))
     ]
     text = ". ".join(current)
-    positive_text = re.split(r"\b(?:willing to sacrifice|at the cost of|at the expense of)\b", text, maxsplit=1, flags=re.I)[0]
-    dims = detect_dimensions(positive_text)
+    positive = []
+    for clause in current:
+        cost = _ACCEPTED_COST.search(clause)
+        if cost and detect_dimensions(clause[cost.end():]):
+            clause = clause[:cost.start()] + clause[cost.end():]
+        positive.append(re.split(r"\b(?:willing to sacrifice|at the cost of|at the expense of)\b", clause,
+                                 maxsplit=1, flags=re.I)[0])
+    dims = detect_dimensions(". ".join(positive))
     explicit = bool(text and not clear and not is_speculative(text) and is_goal_statement(text, dims))
     return Objective(text, dims, explanation, clear, explicit)
 

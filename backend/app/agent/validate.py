@@ -216,7 +216,8 @@ def validate_draft(
     if canonical and not any(e["settingId"] == canonical.id for e in explanations):
         explanations.append({
             "settingId": canonical.id, "label": canonical.exactLabel, "path": canonical.canonicalPath,
-            "tabId": canonical.tabId, "subtabId": canonical.subtabId, "explanation": canonical.description,
+            "tabId": canonical.tabId, "subtabId": canonical.subtabId,
+            "explanation": " ".join(filter(None, (canonical.description, canonical.riskOrTradeoffs))),
             "catalogDescription": canonical.description, "tradeoffs": canonical.riskOrTradeoffs,
             "sourceURL": canonical.sourceURL, "verificationStatus": canonical.verificationStatus, "source": "rules",
         })

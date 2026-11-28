@@ -84,6 +84,7 @@ class TurnState(TypedDict, total=False):
     repair_feedback: Optional[str]
     repairs: int
     batch_partial: bool
+    candidate_window: tuple[int, int]
     batches_completed: int
     batches_total: int
     cross_game_data: Optional[dict[str, Any]]
@@ -357,9 +358,9 @@ def build_turn_graph(
                 objective=state["objective"].text, candidates=rows, maximum=scope_plan.max_recs,
             )
             if decision is not None:
-                limited = len(rows) < min(scope_plan.max_recs, len(audit["candidates"]))
-                return {"draft": decision, "model_calls": mc, "batch_partial": limited,
-                        "batches_completed": 1, "batches_total": 2 if limited else 1}
+                eligible = min(scope_plan.max_recs, len(audit["candidates"]))
+                window = {"candidate_window": (len(rows), eligible)} if len(rows) < eligible else {}
+                return {"draft": decision, "model_calls": mc, "batches_completed": 1, "batches_total": 1, **window}
 
         # Use bounded category-packed passes when a broad/full setup has more than BATCH_SIZE candidates so local Gemma 4
         # stays accurate and well within timeout limits.
@@ -525,6 +526,11 @@ def build_turn_graph(
             partial = bool(state.get("batch_partial", False))
             completed = int(state.get("batches_completed", 1))
             total = int(state.get("batches_total", 1))
+            if state.get("candidate_window") and not state.get("repair_feedback"):
+                reviewed, eligible = state["candidate_window"]
+                notice = f"Partial review. Considered {reviewed} of {eligible} eligible options."
+                validated["reply"] = f"{notice} {validated['reply']}"[:1800]
+                validated["validationNotes"].append(notice)
             if partial:
                 feedback = None
                 validated["reply"] = (
@@ -548,7 +554,7 @@ def build_turn_graph(
             validated["plan"] = {
                 **scope_plan.to_meta(),
                 "autoStage": scope_plan.auto_stage,
-                "partialCoverage": partial,
+                "partialCoverage": partial or bool(state.get("candidate_window") and not state.get("repair_feedback")),
                 "batchesCompleted": completed,
                 "batchesTotal": total,
                 "coverage": {

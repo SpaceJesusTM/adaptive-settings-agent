@@ -171,7 +171,9 @@ def detect_fact_discrepancies(store, profile, conn: sqlite3.Connection) -> list[
     return discrepancies
 
 
-def longitudinal_signals(store, profile, conn: sqlite3.Connection, game: str) -> list[dict[str, Any]]:
+def longitudinal_signals(
+    store, profile, conn: sqlite3.Connection, game: str, *, include_recent_observation: bool = False,
+) -> list[dict[str, Any]]:
     """Look for repeated choices that still explain the current configuration."""
     rows = conn.execute(
         "SELECT e.setting_id, e.old_value_json, e.new_value_json, b.session_id, b.id AS batch_id "
@@ -199,16 +201,28 @@ def longitudinal_signals(store, profile, conn: sqlite3.Connection, game: str) ->
                     "settingId": setting.id, "label": setting.exactLabel, "sessionId": row["session_id"],
                     "batchId": row["batch_id"], "value": display_value(setting, new),
                 })
+    current_session = store.session(conn)["sessionId"] if include_recent_observation else None
     output = []
     for dim, evidence in supporting.items():
         settings = {e["settingId"] for e in evidence}
         sessions = {e["sessionId"] for e in evidence if e["sessionId"]}
-        if dim in explicit or dim in contrary or len(settings) < 2 or len(sessions) < 2:
+        if dim in explicit or dim in contrary:
             continue
+        repeated = len(settings) >= 2 and len(sessions) >= 2
+        if not repeated:
+            evidence = [e for e in evidence if current_session and e["sessionId"] == current_session]
+            if not evidence:
+                continue
+            settings = {e["settingId"] for e in evidence}
+            sessions = {current_session}
         changes = ", ".join(f"{e['label']} ({e['value']})" for e in evidence[:3])
+        explanation = (
+            f"Across {len(sessions)} sessions, you manually chose {changes}. These choices can support {DIMENSION_LABELS[dim]}."
+            if repeated else f"You manually chose {changes} in this session. That can support {DIMENSION_LABELS[dim]}."
+        )
         output.append({
             "dimension": dim, "dimensionLabel": DIMENSION_LABELS[dim], "game": game, "tentative": True,
-            "explanation": f"Across {len(sessions)} sessions, you manually chose {changes}. These choices can support {DIMENSION_LABELS[dim]}.",
+            "explanation": explanation,
             "evidenceSettingIds": sorted(settings), "sessionCount": len(sessions),
         })
     return sorted(output, key=lambda item: (-item["sessionCount"], -len(item["evidenceSettingIds"]), item["dimension"]))
@@ -262,7 +276,7 @@ def build_observed_summary(store, profile, conn: sqlite3.Connection, current_gam
             ),
         })
 
-    tentative_signals = longitudinal_signals(store, profile, conn, current_game)
+    tentative_signals = longitudinal_signals(store, profile, conn, current_game, include_recent_observation=True)
 
     discrepancies = detect_fact_discrepancies(store, profile, conn)
     return {

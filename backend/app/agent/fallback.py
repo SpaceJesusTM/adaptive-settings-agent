@@ -217,7 +217,7 @@ def fallback_turn(
                     audit,
                 )
 
-    if mem_drafts and not re.search(r"\b(change|configure|set up|optimi[sz]e|recommend|suggest|what should i)\b", lower):
+    if mem_drafts and not (objective.explicit and scope_plan.auto_stage):
         saved_labels = []
         for md in mem_drafts:
             if md.kind == "fact" and md.fact_key in PERSONAL_FACT_TYPES:

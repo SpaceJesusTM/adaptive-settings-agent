@@ -165,10 +165,11 @@ def _state_lines(ctx: ToolContext, conn, *, compact: bool = False) -> list[str]:
             "REMEMBERED-VS-LIVE DISCREPANCIES (must disclose clearly): "
             + "; ".join(d["explanation"] for d in obs_summary["discrepancies"][:2])
         )
-    if obs_summary.get("tentativeSignals") and not compact:
+    patterns = [t for t in obs_summary["tentativeSignals"] if t["sessionCount"] >= 2]
+    if patterns and not compact:
         lines.append(
             "TENTATIVE PATTERNS (not confirmed preferences): "
-            + "; ".join(t["explanation"] for t in obs_summary["tentativeSignals"][:2])
+            + "; ".join(t["explanation"] for t in patterns)
         )
     if context_event:
         lines.append(f"SIMULATED CONTEXT EVENT (not a measurement): {context_event['label']}")
