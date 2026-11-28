@@ -25,9 +25,9 @@ class Interpretation(BaseModel):
     action: Literal["recommend", "explain", "clarify", "other"] = Field(
         description="recommend for in-game options or adjustments, explain for questions about function."
     )
-    objective_clause: int | None = Field(default=None, description="Number of the supplied clause that expresses the current goal.")
+    objective_clause: int = Field(description="Number of the supplied clause that expresses the current goal. Use 0 if none.")
     dimensions: list[DimensionLit] = Field(default_factory=list, description="Dimensions that express the desired benefit.")
-    request_clause: int | None = Field(default=None, description="Number of the clause asking for options or an adjustment.")
+    request_clause: int = Field(description="Number of the clause asking for options or an adjustment. Use 0 if none.")
     exclusion_quotes: list[str] = Field(default_factory=list, description="Verbatim clauses that explicitly protect settings.")
     explanation_quote: str = Field(default="", description="Verbatim explanation request, if any.")
     question: str = Field(default="", description="One short clarification for unresolved consequential ambiguity.")
