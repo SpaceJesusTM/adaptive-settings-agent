@@ -256,7 +256,7 @@ class AgentRunner:
                 direct_draft = AssistantDraft(intent="preference", reply="I checked System Understanding for that preference.")
             else:
                 direct_draft = exact_draft(self.store, game, message) or comparison_draft(self.store, game, message)
-                if direct_draft is None and protected_setting_ids(self.store, game, message) and not objective.explicit:
+                if direct_draft is None and protected_setting_ids(self.store, game, message) and not objective.text:
                     if not objective.explanation:
                         direct_draft = AssistantDraft(intent="other", reply="I'll keep those settings unchanged for this objective.")
             if direct_draft is not None:

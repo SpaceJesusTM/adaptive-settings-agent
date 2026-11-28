@@ -17,7 +17,8 @@ _DURABLE_OR_PREFERENCE = re.compile(
     r"i\s+(?:normally|usually|always|prefer|value|would rather|care more|don['’]t (?:really )?care|do not (?:really )?care))\b",
     re.I,
 )
-_NOT_OBJECTIVE = re.compile(r"^\s*(?:also\s+)?(?:keep|leave|don't|do not|avoid|everything except)\b", re.I)
+_NOT_OBJECTIVE = re.compile(r"^\s*(?:also\s+)?(?:keep|leave|don['’]t|do not|avoid|everything except|"
+    r"i (?:want|need) to keep|that recommendation was wrong)\b", re.I)
 _TEMPORARY_END = re.compile(
     r"^\s*(?:(?:actually|okay|ok|now)[, ]+)?(?:"
     r"(?:clear|end|drop|stop|forget)(?:\s+about)?\s+(?:my |the |this |that )?(?:temporary |current |session )?(?:goal|objective)"
