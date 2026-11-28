@@ -25,9 +25,9 @@ class Interpretation(BaseModel):
     action: Literal["recommend", "explain", "clarify", "other"] = Field(
         description="recommend for in-game options or adjustments, explain for questions about function."
     )
-    objective_quote: str = Field(default="", description="Verbatim text in the current user's request expressing the active objective.")
+    objective_clause: int | None = Field(default=None, description="Number of the supplied clause that expresses the current goal.")
     dimensions: list[DimensionLit] = Field(default_factory=list, description="Dimensions that express the desired benefit.")
-    request_quote: str = Field(default="", description="Verbatim words asking for options or an adjustment.")
+    request_clause: int | None = Field(default=None, description="Number of the clause asking for options or an adjustment.")
     exclusion_quotes: list[str] = Field(default_factory=list, description="Verbatim clauses that explicitly protect settings.")
     explanation_quote: str = Field(default="", description="Verbatim explanation request, if any.")
     question: str = Field(default="", description="One short clarification for unresolved consequential ambiguity.")
@@ -46,20 +46,28 @@ def should_interpret(store, game: str, message: str, objective: Objective, scope
     return bool(_CONTRAST.search(message) or (scope.scope == "explain_only" and len(message.split()) >= 5))
 
 
-async def interpret(model, trace, game: str, message: str, history: list[str], controls: list[dict], timeout: float):
+def numbered_clauses(message: str) -> dict[int, str]:
+    parts = re.split(r"(?<=[.!?;])\s+|,\s+(?=(?:but|then)\b)|\s+(?=without\s+(?:changing|touching|adjusting)\b)",
+                     message, flags=re.I)
+    return {i: part for i, part in enumerate((p.strip() for p in parts if p.strip()), 1)}
+
+
+async def interpret(model, trace, game: str, message: str, history: list[str], controls: list[dict],
+                    clauses: dict[int, str], timeout: float):
     system = (
         "Interpret the current turn for the active game's in-game settings menu. Stay inside this menu. "
         "Classify a request for options as recommend; a question about a control's function as explain. "
         "Use the user's desired effect to choose a dimension, even if they do not know the name of a setting. "
         "The menu entries are context, not additional intent. Clarify only ambiguities that would materially change advice. Preserve exclusions, "
         "and keep the current objective separate from accepted costs, habitual preferences and quoted examples. "
-        "Copy short evidence spans from the user. Prior messages are context only. Do not propose values or save memory."
+        "Point to the numbered clauses for the goal and request; copy exclusion or explanation words verbatim. "
+        "Prior messages are context only. Do not propose values or save memory."
     )
     invoker = model.with_structured_output(Interpretation, method="json_schema", include_raw=True)
     out = await trace.invoke("interpret", invoker, [
         SystemMessage(system),
         HumanMessage(json.dumps({
-            "game": game, "recent": history[-4:], "request": message,
+            "game": game, "recent": history[-4:], "request": message, "clauses": list(clauses.items()),
             "dimensions": DIMENSION_LABELS, "nearby_menu_entries": controls,
         }, ensure_ascii=False)),
     ], timeout=timeout)
@@ -72,13 +80,13 @@ def evidence_span(message: str, quote: str) -> str:
     return phrase if len(phrase) >= 5 and phrase.casefold() in message.casefold() else ""
 
 
-def apply_interpretation(store, game, message, objective, scope, protected, parsed):
+def apply_interpretation(store, game, message, objective, scope, protected, parsed, clauses):
     """Use model semantics for relevance. Exact constraints and eligibility stay in code."""
     if parsed is None:
         return objective, scope, protected, None
     if parsed.action == "clarify" and parsed.question and not objective.explicit:
         return objective, scope, protected, AssistantDraft(intent="clarify", reply=parsed.question)
-    clause = evidence_span(message, parsed.objective_quote)
+    clause = clauses.get(parsed.objective_clause, "")
     dims = list(dict.fromkeys(parsed.dimensions))[:5]
     explanation = evidence_span(message, parsed.explanation_quote) or objective.explanation
     objective = replace(objective, explanation=explanation)
@@ -100,7 +108,7 @@ def apply_interpretation(store, game, message, objective, scope, protected, pars
     if parsed.action == "recommend" and clause and dims:
         objective = replace(objective, text=clause, dimensions=dims, explicit=True)
         if scope.scope == "explain_only":
-            request = evidence_span(message, parsed.request_quote)
+            request = clauses.get(parsed.request_clause, "")
             requested_options = request and (_REQUESTS_CHANGE.search(request) or _ADVICE_REQUEST.search(request))
             scope = replace(scope, scope="category_optimization", max_recs=8,
                             auto_stage=bool(requested_options),

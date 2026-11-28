@@ -41,7 +41,7 @@ from .prompts import (
 from .schemas import AssistantDraft, BatchDraft, DraftRecommendation
 from .scope import ScopePlan
 from .objective import Objective, objective_takes_precedence, prepare_objective, quoted_as_example
-from .decisions import apply_interpretation, evidence_span, interpret, select_candidates, should_interpret
+from .decisions import apply_interpretation, interpret, numbered_clauses, select_candidates, should_interpret
 from .tools import MAX_TOOL_RESULT_CHARS, ToolContext, langchain_tools, run_tool, search_settings
 from .telemetry import TurnTelemetry
 from .validate import needs_repair, validate_draft
@@ -158,6 +158,7 @@ def build_turn_graph(
         elif reasoning_mode == "semantic" and should_interpret(store, state["game"], state["message"], objective, scope_plan):
             progress("Interpreting your goal and constraints")
             semantic_started = time.perf_counter()
+            clauses = numbered_clauses(state["message"])
             try:
                 query = re.split(r"\b(?:without\s+(?:changing|touching|adjusting)|leave|keep)\b",
                                  objective.text or state["message"], maxsplit=1, flags=re.I)[0]
@@ -170,19 +171,20 @@ def build_turn_graph(
                     if len(menu_entries) == 4:
                         break
                 parsed = await interpret(compose_model, measured, state["game"], state["message"],
-                                         recent_conversation(store, state["game"], exchanges=1), menu_entries,
+                                         recent_conversation(store, state["game"], exchanges=1), menu_entries, clauses,
                                          min(45.0, deadline_s * 0.36))
             except Exception:
                 parsed = None
             if parsed is not None:
                 before = objective
                 objective, scope_plan, protected, clarified = apply_interpretation(
-                    store, state["game"], state["message"], objective, scope_plan, protected, parsed,
+                    store, state["game"], state["message"], objective, scope_plan, protected, parsed, clauses,
                 )
                 measured.calls[-1]["decision"] = {
                     "action": parsed.action, "dimensions": parsed.dimensions,
-                    "objectiveGrounded": bool(evidence_span(state["message"], parsed.objective_quote)),
-                    "objectiveChanged": before != objective,
+                    "objectiveGrounded": parsed.objective_clause in clauses,
+                    "requestGrounded": parsed.request_clause in clauses,
+                    "objectiveChanged": before.text != objective.text or before.dimensions != objective.dimensions,
                 }
                 if objective != before and objective.explicit:
                     conn = store.connect()
