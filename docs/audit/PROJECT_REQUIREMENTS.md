@@ -1,0 +1,24 @@
+# Project and design-goal traceability
+
+GamePlan investigates how an AI-adaptive settings interface can support changing player goals and understanding while preserving familiar navigation and player control. VALORANT and Counter-Strike 2 provide two catalogues inside a simulator. The evidence in this audit concerns simulator behavior on a local model and scripted interactions. Learning, acceptance, usability, and actual changes in game performance require separate studies.
+
+The framing follows the December 1 presentation outline, November 20 paper outline, Pass 1 and follow-up requirements, and November 23 Pilot Tasks and Measures in the project document. The pilot's current task definitions take precedence over the older scenario order in [the repository protocol](../PARTICIPANT_PILOT.md). The audit contains a synthetic operationalization and excludes private source text and interaction data.
+
+| Design goal | Required behavior | Technical evidence | Next human measure |
+| --- | --- | --- | --- |
+| DG1 Discovery and continuity | Keep every canonical row, category and manual control available. Link useful unfamiliar or overlooked settings back to their original locations. | Playwright condition parity and canonical search. Discover top-k relevance, unique eligible cards and cross-game checks. | Unaided recognition and location of a goal-relevant unfamiliar setting after assisted use. |
+| DG2 Understanding | Explain function, goal relevance and trade-offs. Identify when an existing value is suitable and what evidence is missing. | Concept checks and manual reading of generated explanations. Separately report aligned controls and unjustified changes. | Closed-book explanation of what a control does and how to reason about its trade-off in a new scenario. |
+| DG3 Authority | Distinguish suggestions, staged values, manual edits and committed changes. Keep Apply, edit, reject, locks, Undo, history and restaging. | API snapshots before and after chat and Apply. Repeatable review, edit, reject, lock, idempotency and rollback journeys. | Observe inspection, edits, rejection, recovery and reasons for accepting or declining a proposal. |
+| DG4 Adaptation | Represent immediate objectives separately from confirmed preferences, observed values and interpretation. Allow revision and game scope. | Temporary-goal sequence, preference coexistence and withdrawal, live manual A1→B1 history, source-sensitive onboarding. | Ask which evidence players consider relevant, whether they notice the system's inference, and whether they can correct it in context. |
+
+## Pilot and demonstration tasks
+
+- **A1 and B1.** Start with fresh VALORANT in baseline condition and make meaningful manual changes. Preserve A1 history, then open fresh CS2 in adaptive condition. Observe assistance before explicit transfer. A2/A3 fixtures must stay out of B1 history. The technical replay deliberately creates manual evidence for mouse sensitivity, push-to-talk and ping. It checks useful inspection opportunities, directions and provenance.
+- **A2 and B2.** A2 targets fidelity with richer effects. B2 targets practical frame rate, responsiveness and player visibility. Both start with 2/8 on independently authored criteria and use simulated NVIDIA hardware. Preserve controls, crosshair, audio, resolution and aspect ratio. In [the benchmark](../../scripts/run_audit_benchmark.py), known acceptable alternatives get full or partial credit as defined before the experiment. A2 in adaptive mode is a diagnostic alongside B2 and does not alter the human protocol.
+- **A3 and B3.** Independently target four explicit values per game. Score staged settings and guidance for manual settings separately. Preserve unrelated values and exercise CS2's independent HUD Edge Positions Done behavior in the browser. API replay executes specified manual controls only after recording the assistant's guidance.
+- **A4 and B4.** Restore only the previous volume after exact changes. Read the actual recorded prior value and verify the other three values survive. Exercise Apply, Undo and restaging in complementary journeys.
+- **Independent understanding.** Probe anti-aliasing, filtering, VSync, Reflex, ambient occlusion, shadows, FPS versus refresh rate, and diagnostic concepts. A text match is a technical proxy. The priority for a first study is unaided comprehension of goal-relevant settings, with baseline access and prior experience measured.
+
+## Boundaries
+
+The catalogue defines valid values and simulated hardware availability. The runtime cannot observe real frame rate, latency, GPU work, visual quality, or what the player knows. Inputs to the comparative suite are predeclared synthetic fixtures, and its scoring criteria stay outside assistant prompts, game state and participant UI. The [reproducible evidence](EVALUATION_RESULTS.md) reports performance conditional on test state, model and Apply policy.
