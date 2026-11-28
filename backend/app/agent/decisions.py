@@ -9,6 +9,7 @@ from typing import Literal
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
+from ..catalog.schema import DIMENSION_LABELS
 from .explain import explanation_target, named_controls
 from .objective import Objective, explicit_memory_clauses, protected_setting_ids, quoted_as_example
 from .schemas import AssistantDraft, DimensionLit, DraftRecommendation
@@ -21,9 +22,11 @@ _HARD_WORDS = re.compile(r"\b(?:keep|leave|preserve|alone|unchanged|avoid|never|
 
 
 class Interpretation(BaseModel):
-    action: Literal["recommend", "explain", "clarify", "other"]
+    action: Literal["recommend", "explain", "clarify", "other"] = Field(
+        description="recommend for in-game options or adjustments, explain for questions about function."
+    )
     objective_quote: str = Field(default="", description="Verbatim text in the current user's request expressing the active objective.")
-    dimensions: list[DimensionLit] = Field(default_factory=list)
+    dimensions: list[DimensionLit] = Field(default_factory=list, description="Dimensions that express the desired benefit.")
     request_quote: str = Field(default="", description="Verbatim words asking for options or an adjustment.")
     exclusion_quotes: list[str] = Field(default_factory=list, description="Verbatim clauses that explicitly protect settings.")
     explanation_quote: str = Field(default="", description="Verbatim explanation request, if any.")
@@ -43,18 +46,22 @@ def should_interpret(store, game: str, message: str, objective: Objective, scope
     return bool(_CONTRAST.search(message) or (scope.scope == "explain_only" and len(message.split()) >= 5))
 
 
-async def interpret(model, trace, game: str, message: str, history: list[str], timeout: float):
+async def interpret(model, trace, game: str, message: str, history: list[str], controls: list[dict], timeout: float):
     system = (
         "Interpret the current turn for the active game's in-game settings menu. Stay inside this menu. "
-        "A question about how to achieve a result asks for options. A question about what a control does asks for an explanation. "
-        "Use clarify for ambiguous references or exclusions that would change the advice. Preserve exclusions, "
+        "Classify a request for options as recommend; a question about a control's function as explain. "
+        "Use the user's desired effect to choose a dimension, even if they do not know the name of a setting. "
+        "The menu entries are context, not additional intent. Clarify only ambiguities that would materially change advice. Preserve exclusions, "
         "and keep the current objective separate from accepted costs, habitual preferences and quoted examples. "
         "Copy short evidence spans from the user. Prior messages are context only. Do not propose values or save memory."
     )
     invoker = model.with_structured_output(Interpretation, method="json_schema", include_raw=True)
     out = await trace.invoke("interpret", invoker, [
         SystemMessage(system),
-        HumanMessage(json.dumps({"game": game, "recent": history[-4:], "request": message}, ensure_ascii=False)),
+        HumanMessage(json.dumps({
+            "game": game, "recent": history[-4:], "request": message,
+            "dimensions": DIMENSION_LABELS, "nearby_menu_entries": controls,
+        }, ensure_ascii=False)),
     ], timeout=timeout)
     parsed = out.get("parsed") if isinstance(out, dict) else out
     return parsed if isinstance(parsed, Interpretation) else None
