@@ -642,6 +642,94 @@ def exact_batch(s):
             items)
 
 
+def read_only_turn(s, game, message, expected_setting=None):
+    s.select(game)
+    result = s.turn(game, message)
+    profile = s.profile(game)
+    s.check("read_only_without_new_profile_state",
+            not result.get("recommendations") and not result.get("stagedProposalId")
+            and not profile["preferences"] and not profile["personalFacts"] and not goals(profile, game),
+            {"intent": result.get("intent"), "recommendations": len(result.get("recommendations", []))})
+    if expected_setting:
+        s.check("exact_status_has_canonical_target",
+                (result.get("navigateTo") or {}).get("settingId") == expected_setting,
+                result.get("navigateTo"))
+
+
+def remember_crosshair(s):
+    s.select(VAL)
+    result = s.turn(VAL, "Remember that I prefer a small green crosshair.")
+    facts = s.profile(VAL)["personalFacts"]
+    s.check("explicit_qualitative_fact_is_retained",
+            [(f["factKey"], f["valueText"]) for f in facts] == [("crosshair_style", "small green")]
+            and not result.get("stagedProposalId"),
+            [{"key": f["factKey"], "value": f["valueText"]} for f in facts])
+
+
+def evidence_after_undo(s):
+    s.select(VAL, "baseline")
+    changed = s.manual(VAL, {"val.general.sensitivity_aim": 0.42})
+    s.request("POST", f"/history/{changed['batchId']}/undo", {})
+    s.select(CS)
+    cards = active_cards(s.discover(CS))
+    s.check("restoration_is_factual_without_a_new_transfer_inference",
+            not any(c["settingId"] == "cs2.kbmouse.mouse_sensitivity" and c["crossGame"] for c in cards),
+            card_items(cards))
+
+
+def correction_only(s):
+    s.select(CS)
+    s.turn(CS, "Improve CS2's practical FPS and input latency.")
+    before = s.profile(CS)
+    result = s.turn(CS, "That recommendation was wrong. I want to keep the dynamic shadows because they help me spot players.")
+    after = s.profile(CS)
+    active = after["sessionGoals"][CS]
+    expected = "cs2.video.dynamic_shadows"
+    s.check("specific_correction_keeps_objective_and_adds_protection",
+            bool(active) and expected in active[0].get("protectedSettingIds", [])
+            and goals(before, CS) == goals(after, CS) and not result.get("stagedProposalId"),
+            {"goals": goals(after, CS), "protectedSettingIds": active[0].get("protectedSettingIds") if active else []})
+
+
+def temporary_volume(s):
+    s.select(CS)
+    result = s.turn(CS, "Set my volume to 40% for tonight.")
+    proposal = s.proposal(result)
+    items = {i["settingId"]: i["effectiveValue"] for i in (proposal or {}).get("items", [])}
+    s.check("one_night_exact_value_staged", items == {"cs2.audio.master_volume": 0.4}, items)
+    p = s.profile(CS)
+    s.check("one_night_exact_value_avoids_durable_state", not p["preferences"] and not p["personalFacts"] and not goals(p, CS))
+
+
+def clear_objective(s):
+    s.select(VAL)
+    s.turn(VAL, "Remember that I usually prioritize FPS.")
+    s.turn(VAL, "Tonight I want better visual quality.")
+    result = s.turn(VAL, "Clear my current goal.")
+    profile = s.profile(VAL)
+    s.check("chat_ends_objective_while_retaining_saved_priority",
+            not goals(profile, VAL) and any(p["dimension"] == "performance" and p["scope"] == "durable"
+                                            for p in profile["preferences"]) and not result.get("stagedProposalId"),
+            {"preferences": preference_items(profile), "goals": goals(profile, VAL)})
+
+
+def explicit_visibility(s):
+    s.select(CS)
+    result = s.turn(CS, "I don't really care about graphics quality, but I still need to see enemies clearly.")
+    profile = s.profile(CS)
+    s.check("current_visibility_without_durable_demotion",
+            goals(profile, CS) == [["visibility"]] and not profile["preferences"],
+            {"goals": goals(profile, CS), "staged": result.get("stagedCount", 0)})
+
+
+def modality_preference(s):
+    s.select(CS)
+    s.turn(CS, "I always use push to talk.")
+    facts = s.profile(CS)["personalFacts"]
+    s.check("voice_mode_translates_to_inspectable_preference",
+            any(f["factKey"] == "voice_activation" for f in facts), [f["factKey"] for f in facts])
+
+
 CASES = {
     "a1_b1_onboarding": (onboarding, (), "project"),
     "b_objective_shift": (goals_journey, (), "project"),
@@ -667,6 +755,21 @@ CASES = {
     "speculative_preference": (no_durable, ("Maybe later I might try prioritizing graphics quality.",), "holdout"),
     "hypothetical_frame_quality": (no_durable, ("What if I wanted more FPS next month?",), "holdout"),
     "model_unavailable": (unavailable_model, (), "development"),
+    "protected_sensitivity_statement": (read_only_turn, (VAL, "Keep my sensitivity exactly as it is."), "holdout"),
+    "recovery_with_no_change_event": (read_only_turn, (CS, "Restore the volume to its previous value.",
+                                      "cs2.audio.master_volume"), "holdout"),
+    "numeric_value_out_of_range": (read_only_turn, (VAL, "Set Overall Volume to 125%.",
+                                   "val.audio.overall_volume"), "holdout"),
+    "already_aligned_exact_toggle": (read_only_turn, (VAL, "Enable VSync.", "val.video.vsync"), "holdout"),
+    "direct_shadow_navigation": (navigate, (CS, "Where can I find Dynamic Shadows?", "cs2.video.dynamic_shadows"), "holdout"),
+    "tentative_memory_wording": (no_durable, ("Remember that I might try emphasizing visibility next week.",), "holdout"),
+    "explicit_crosshair_style": (remember_crosshair, (), "holdout"),
+    "no_cross_game_inference_from_undo": (evidence_after_undo, (), "holdout"),
+    "protect_after_recommendation": (correction_only, (), "holdout"),
+    "exact_for_tonight": (temporary_volume, (), "holdout"),
+    "clear_objective_in_chat": (clear_objective, (), "holdout"),
+    "visibility_over_graphics": (explicit_visibility, (), "holdout"),
+    "voice_mode_habit": (modality_preference, (), "holdout"),
 }
 for name, *args in EXPLANATIONS:
     CASES[f"explain_{name}"] = (explain_case, tuple(args), "project")
