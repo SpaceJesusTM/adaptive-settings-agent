@@ -256,7 +256,7 @@ def validate_draft(
         for sentence in re.split(r"(?<=[.!?])\s+", reply):
             action = CLAIMED_ACTION_RE.search(sentence)
             if action and (action[1].lower() != "saved" or not memory_actions):
-                notes.append("Removed an unverified claim that the assistant made a change.")
+                notes.append("The reply claimed an action. Removed the unverified sentence.")
             else:
                 kept.append(sentence)
         reply = " ".join(kept)
